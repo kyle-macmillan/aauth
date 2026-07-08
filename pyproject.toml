@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aauth-edocs"
+version = "0.1.0"
+description = "AAuth protocol (draft-hardt-oauth-aauth-protocol-09) for internal eDocs experimentation"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42.0",
+    "joserfc>=0.9.0",
+    "http-sfv>=0.9.9",
+    "requests>=2.31",
+    "flask>=3.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/aauth_edocs"]
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    # We deliberately use alg=EdDSA (not RFC 9864's Ed25519) to match the
+    # other AAuth implementations.
+    "ignore:EdDSA is deprecated:Warning",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+# Cross-checks against the exploratory PyPI implementation (christian-posta/aauth-python-library).
+# Tests in tests/interop/ auto-skip when this group is not installed.
+interop = [
+    "aauth>=0.3.5",
+]
