@@ -1,6 +1,40 @@
 author: Kyle
 
 ---
+
+# Resource
+The resource server in eDocs will need to be re-architected to support server-side / TEE-side
+computation over resources. With traditional AAuth, agents request access to a resource. Here,
+agents may optionally request the result of a transformed resource. Thus, we need to decide where
+and who perform this computation. 
+
+A first option is at the resource. The is simplest and where we should start. The downside is agent
+maliciously requesting resources (imagine a DoS/DDoS). One solution is blacklisting bad agents,
+which, because they are tied to a person server (unlike IP addresses) seems like a better solution.
+Alternatively, agents and resources could use the x402 protocol, which requires agents to pay to
+access resources. 
+
+## Resource Token
+- Resource token must include either the eDoc id or populate the Register flag. We will need to extend 
+the current resource token schema to include an optional Register flag. The resource controller can
+include both some eDoc Id and Register flag. That way, resource controllers can start to create
+policies before registering an eDoc. 
+- The aud field should now be a list of the ASes believed to be controllers. There may be multiple
+controllers if the requested resource is derived from other resources controlled by different
+actors. 
+
+# Person Server
+- Person servers should always forward the resource token to the sentinel, as opposed to the named 
+ASes in the resource token aud field. 
+- Person servers can still deny access based on the aud field without contacting the sentinel. 
+
+# Access Server
+- Access servers (other than the sentinel) don't mint auth tokens anymore. Instead, the sentinel
+will forward the resource token to the appropriate access servers. The ASes proceed as usual,
+evaluating the resource token against their policies. ASes can accept/reject as usual. Because we
+want eDocs to support conditional policies, ASes can also submit conditional acceptances that depend
+on global state held by the sentinel. 
+
 # Sentinel
 How the sentinel sits into the AAuth protocol.
 
@@ -49,3 +83,5 @@ multiple controllers if, e.g., the eDoc is the product of eDocs controller by di
 ## API 
 - Controllers should be able to request the provenance of an eDoc they can control. 
 - Controllers should be able to delegate control rights to other entities. 
+
+
