@@ -19,9 +19,10 @@ access resources.
 the current resource token schema to include an optional Register flag. The resource controller can
 include both some eDoc Id and Register flag. That way, resource controllers can start to create
 policies before registering an eDoc. 
-- The aud field should now be a list of the ASes believed to be controllers. There may be multiple
-controllers if the requested resource is derived from other resources controlled by different
-actors. 
+- The aud field should now always be the sentinel, while we add a list of known controllers in
+another field. 
+- Additional required fields: function, inputs, known ASes
+
 
 # Person Server
 - Person servers should always forward the resource token to the sentinel, as opposed to the named 
