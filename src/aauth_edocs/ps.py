@@ -22,7 +22,7 @@ from .deferred import PendingStore
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
 from .headers import APPROVAL, CLAIMS, CLARIFICATION, INTERACTION, build_requirement, parse_requirement
 from .httpsig import HttpRequest, peek_jwt, sign_server, verify
-from .ids import DWK_ACCESS, DWK_PERSON
+from .ids import DWK_ACCESS, DWK_PERSON, DWK_SENTINEL
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata, fetch_metadata
 from .tokens import AGENT_TYP, issue_auth_token, verify_agent_token, verify_auth_token, verify_resource_token
@@ -385,7 +385,7 @@ def create_ps(
 
         # four-party: federate with the AS the resource named (§9.3)
         as_url = rt_claims["aud"]
-        as_md = fetch_metadata(as_url, DWK_ACCESS, transport)
+        as_md = fetch_metadata(as_url, DWK_SENTINEL, transport)
         req = HttpRequest("POST", as_md.endpoint("token_endpoint"), {})
         sign_server(req, key, issuer, DWK_PERSON)
         response = transport.request(

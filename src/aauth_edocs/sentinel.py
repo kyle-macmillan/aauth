@@ -3,6 +3,8 @@ Our approach to making data rival"""
 
 from __future__ import annotations
 
+from typing import Any, Callable
+
 from flask import Flask, request
 
 from .metadata import JwksResolver
@@ -17,10 +19,14 @@ from .httpsig import HttpRequest, verify
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 from .keys import SigningKey, jwk_thumbprint
 
+# policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
+Policy = Callable[[str, dict, dict], "str | None | dict[str, Any]"]
+
 
 def create_sentinel(
     issuer: str,
-    key: SigningKey,
+    key: SigningKey | None = None,
+    policy: Policy | None = None,
     transport=None,
     app: Flask | None = None,
     token_path: str = "/token",
@@ -78,17 +84,13 @@ def create_sentinel(
         )
 
         context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
-        # granted = policy(ps_url, agent_claims, rt_claims) if policy else rt_claims.get("scope")
-        # if granted is None:
-        #     raise AAuthError("denied", 403, "resource policy denied the request")
-        # if isinstance(granted, dict):
-        #     return _defer(granted, context)
+        granted = rt_claims.get("scope")
 
-        return _issue(context)
+        return _issue(context, granted)
 
 
     def _issue(context: dict, granted_scope: str | None, claims: dict | None = None):
-        _check_rule(granted_scope, context["rt_claims"].get("scope"))
+        _check_rule()
         token = issue_auth_token(
             issuer=issuer,
             dwk=DWK_SENTINEL,

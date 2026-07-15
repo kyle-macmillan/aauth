@@ -5,6 +5,7 @@ the simplifications relative to the spec."""
 from .agent import AgentSession, RequestsTransport, TransportResponse
 from .ap import create_ap
 from .asrv import create_as
+from .sentinel import create_sentinel
 from .deferred import PendingStore, poll
 from .errors import AAuthError
 from .headers import (

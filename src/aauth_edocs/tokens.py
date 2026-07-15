@@ -120,7 +120,7 @@ def issue_auth_token(
     `dwk` is aauth-person.json (PS-issued) or aauth-access.json (AS-issued).
     At least one of sub/scope is required.
     """
-    if dwk not in (DWK_PERSON, DWK_ACCESS):
+    if dwk not in (DWK_PERSON, DWK_ACCESS, DWK_SENTINEL):
         raise ValueError("auth token dwk must be aauth-person.json or aauth-access.json")
     if sub is None and scope is None:
         raise ValueError("auth token needs at least one of sub or scope")
