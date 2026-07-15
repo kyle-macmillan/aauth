@@ -18,7 +18,7 @@ from joserfc.jwk import OKPKey
 
 from .errors import AAuthError, INVALID_TOKEN
 from .httpsig import KeyResolver, verify_jwt
-from .ids import DWK_ACCESS, DWK_AGENT, DWK_PERSON, DWK_RESOURCE
+from .ids import DWK_ACCESS, DWK_AGENT, DWK_PERSON, DWK_RESOURCE, DWK_SENTINEL
 from .keys import SigningKey, jwk_thumbprint
 
 AGENT_TYP = "aa-agent+jwt"
@@ -229,7 +229,7 @@ def verify_auth_token(
     issuer dwk of person/access, aud = me, cnf.jwk = the request's signing
     key, and at least one of sub/scope."""
     claims = _decode(token, key_resolver, AUTH_TYP, now)
-    if claims.get("dwk") not in (DWK_PERSON, DWK_ACCESS):
+    if claims.get("dwk") not in (DWK_PERSON, DWK_ACCESS, DWK_SENTINEL):
         raise AAuthError(INVALID_TOKEN, detail=f"auth token dwk {claims.get('dwk')!r} not recognized")
     if claims.get("aud") != aud:
         raise AAuthError(INVALID_TOKEN, detail=f"auth token aud is {claims.get('aud')}, not us")

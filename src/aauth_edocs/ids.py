@@ -12,6 +12,7 @@ DWK_AGENT = "aauth-agent.json"
 DWK_PERSON = "aauth-person.json"
 DWK_ACCESS = "aauth-access.json"
 DWK_RESOURCE = "aauth-resource.json"
+DWK_SENTINEL = "aauth-sentinel.json"
 
 
 def agent_id(local: str, domain: str) -> str:
