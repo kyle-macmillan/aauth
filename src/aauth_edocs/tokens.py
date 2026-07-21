@@ -1,6 +1,6 @@
-"""The three AAuth token types: agent (§5.2), resource (§6.7), auth (§9.4).
+"""The three AAuth token types: agent (?5.2), resource (?6.7), auth (?9.4).
 
-Builders set typ/dwk/jti/iat/exp; verifiers check what the flows depend on —
+Builders set typ/dwk/jti/iat/exp; verifiers check what the flows depend on ?
 signature via the issuer's published key, typ, exp, and the binding claims
 (aud = me, agent = expected, cnf.jwk / agent_jkt = the request's signing key).
 Internal-experimentation scope: no lifetime-cap enforcement, no act-chain or
@@ -47,7 +47,7 @@ def issue_agent_token(
     lifetime: int = 24 * 3600,
     now: Now = time.time,
 ) -> str:
-    """Agent-provider side: bind `agent_jwk` to the agent identifier (§5.2.2)."""
+    """Agent-provider side: bind `agent_jwk` to the agent identifier (ยง5.2.2)."""
     return _issue(
         AGENT_TYP,
         key,
@@ -74,13 +74,16 @@ def issue_resource_token(
     key: SigningKey,
     mission: dict | None = None,
     interaction: dict | None = None,
+    controller: str | None = None,
     lifetime: int = 300,
     now: Now = time.time,
 ) -> str:
-    """Resource side: describe the access the agent needs (§6.7.1).
+    """Resource side: describe the access the agent needs (?6.7.1).
 
-    `aud` is the PS URL (three-party) or AS URL (four-party). `mission` is a
-    mission-reference claim dict when the agent sent AAuth-Mission (§8.7).
+    `aud` is the PS URL (three-party), AS URL (four-party), or sentinel URL
+    (eDocs). When `aud` is a sentinel, `controller` is the controller AS URL.
+    `mission` is a mission-reference claim dict when the agent sent
+    AAuth-Mission (?8.7).
     """
     return _issue(
         RESOURCE_TYP,
@@ -94,6 +97,7 @@ def issue_resource_token(
             "scope": scope,
             "mission": mission,
             "interaction": interaction,
+            "controller": controller,
         },
         lifetime,
         now,
@@ -115,7 +119,7 @@ def issue_auth_token(
     lifetime: int = 3600,
     now: Now = time.time,
 ) -> str:
-    """PS/AS side: grant the agent access to `aud` (§9.4.1).
+    """PS/AS side: grant the agent access to `aud` (?9.4.1).
 
     `dwk` is aauth-person.json (PS-issued) or aauth-access.json (AS-issued).
     At least one of sub/scope is required.
@@ -157,7 +161,7 @@ def verify_agent_token(
     signing_jwk: dict | None = None,
     now: Now = time.time,
 ) -> dict:
-    """Verify an agent token (§5.2.4); optionally bind it to the request's
+    """Verify an agent token (?5.2.4); optionally bind it to the request's
     signing key (cnf.jwk must match `signing_jwk`). Returns the claims."""
     claims = _decode(token, key_resolver, AGENT_TYP, now)
     if signing_jwk is not None:
@@ -174,11 +178,17 @@ def verify_resource_token(
     agent_jkt: str | None = None,
     now: Now = time.time,
 ) -> dict:
-    """PS/AS-side resource token verification (§6.7.2). `aud` is the
-    recipient's own identifier; agent/agent_jkt are checked when given."""
+    """PS/AS-side resource token verification (?6.7.2). `aud` is the
+    recipient's own identifier (or matches RT `controller` on the sentinel
+    path). agent/agent_jkt are checked when given."""
     claims = _decode(token, key_resolver, RESOURCE_TYP, now)
-    if claims.get("aud") != aud:
-        raise AAuthError(INVALID_TOKEN, detail=f"resource token aud is {claims.get('aud')}, not us")
+    # Classic: aud == recipient. Sentinel path: aud is the sentinel and
+    # controller == this AS (dual-authority eDocs profile).
+    if claims.get("aud") != aud and claims.get("controller") != aud:
+        raise AAuthError(
+            INVALID_TOKEN,
+            detail=f"resource token aud/controller is {claims.get('aud')!r}/{claims.get('controller')!r}, not us",
+        )
     if agent is not None and claims.get("agent") != agent:
         raise AAuthError(INVALID_TOKEN, detail="resource token agent mismatch")
     if agent_jkt is not None and claims.get("agent_jkt") != agent_jkt:
@@ -195,7 +205,7 @@ def check_resource_challenge(
     key_resolver: KeyResolver | None = None,
     now: Now = time.time,
 ) -> dict:
-    """Agent-side check of a resource token from a 401 challenge (§6.7.3):
+    """Agent-side check of a resource token from a 401 challenge (?6.7.3):
     it names the resource we called, us, and our key. Signature verification
     is optional here (pass a resolver to enable it)."""
     if key_resolver is not None:
@@ -225,7 +235,7 @@ def verify_auth_token(
     signing_jwk: dict | None = None,
     now: Now = time.time,
 ) -> dict:
-    """Resource-side auth token verification (§9.4.3, simplified): typ, an
+    """Resource-side auth token verification (?9.4.3, simplified): typ, an
     issuer dwk of person/access, aud = me, cnf.jwk = the request's signing
     key, and at least one of sub/scope."""
     claims = _decode(token, key_resolver, AUTH_TYP, now)

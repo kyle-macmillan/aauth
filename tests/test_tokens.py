@@ -63,6 +63,24 @@ def test_resource_token_roundtrip(resource_key, agent_key, agent, resolver):
     assert claims["mission"] == mission
 
 
+def test_resource_token_controller_satisfies_as_aud(resource_key, agent_key, agent, resolver):
+    """Sentinel path: RT aud is the sentinel; controller names this AS."""
+    sentinel = "https://sentinel.example"
+    as_url = "https://as.example"
+    rt = issue_resource_token(
+        issuer=RESOURCE,
+        aud=sentinel,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="data.read",
+        controller=as_url,
+        key=resource_key,
+    )
+    claims = verify_resource_token(rt, resolver, aud=as_url, agent=agent, agent_jkt=agent_key.thumbprint)
+    assert claims["aud"] == sentinel
+    assert claims["controller"] == as_url
+
+
 def test_resource_token_wrong_aud(resource_key, agent_key, agent, resolver):
     rt = issue_resource_token(
         issuer=RESOURCE, aud="https://other.example", agent=agent, agent_jkt=agent_key.thumbprint,

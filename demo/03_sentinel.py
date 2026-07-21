@@ -3,10 +3,10 @@
 Runs AP (:5001), Resource (:5002), PS (:5003), sentinel (:5005) and AS (:5004), then:
   1. calls the protected endpoint unsigned  -> 401 + requirement=agent-token
   2. enrolls an agent bound to the PS
-  3. authorize: resource token -> PS federates to AS -> auth token
+  3. authorize: resource token -> PS federates to sentinel -> AS -> auth token
   4. presents the auth token to the resource -> 200
 
-The agent never talks to the AS; federation is invisible to it (§13.1.1).
+The agent never talks to the AS or sentinel; federation is invisible to it (§13.1.1).
 
 Run: uv run python demo/03_sentinel.py
 """
@@ -19,7 +19,7 @@ import warnings
 warnings.filterwarnings("ignore", message="EdDSA is deprecated")  # we match other AAuth impls
 
 import requests
-from flask import Flask, g
+from flask import Flask, g, request
 
 from aauth_edocs import (
     AgentSession,
@@ -42,6 +42,21 @@ PS_URL = "http://127.0.0.1:5003"
 AS_URL = "http://127.0.0.1:5004"
 SENTINEL_URL = "http://127.0.0.1:5005"
 
+PARTY_NAMES = {
+    AP_URL: "AP",
+    RESOURCE_URL: "Resource",
+    PS_URL: "PS",
+    AS_URL: "AS",
+    SENTINEL_URL: "Sentinel",
+}
+
+
+def fmt_url(url: str | None) -> str:
+    if not url:
+        return "None"
+    name = PARTY_NAMES.get(url)
+    return f"{url} ({name})" if name else url
+
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 
@@ -51,7 +66,8 @@ def make_resource() -> Flask:
         issuer=RESOURCE_URL,
         key=SigningKey.generate(kid="res"),
         key_resolver=JwksResolver(transport),
-        as_url=SENTINEL_URL,  # sentinel: resource token aud is the sentinel
+        as_url=SENTINEL_URL,  # grant audience: resource token aud is the sentinel
+        controller_url=AS_URL,  # controller AS the sentinel forwards to
         default_scope="docs.read",
     )
     app = Flask(__name__)
@@ -77,6 +93,50 @@ def as_policy(ps_url, agent_claims, rt_claims):
     return " ".join(readable) or None
 
 
+def checkpoint(app: Flask, label: str) -> Flask:
+    """Print enter/exit on POST /token so the PS -> sentinel -> AS hop is visible."""
+
+    @app.before_request
+    def _enter():
+        if request.method != "POST" or request.path != "/token":
+            return
+        body = request.get_json(silent=True) or {}
+        parts = [f"  [{label}] POST /token"]
+        if rt := body.get("resource_token"):
+            _, rt_claims = peek_jwt(rt)
+            parts.append(
+                f"    resource_token:\n      iss={fmt_url(rt_claims.get('iss'))}"
+                f"\n      aud={fmt_url(rt_claims.get('aud'))}"
+                f"\n      controller={fmt_url(rt_claims.get('controller'))}"
+                f"\n      scope={rt_claims.get('scope')}"
+            )
+        if at := body.get("agent_token"):
+            _, agent_claims = peek_jwt(at)
+            parts.append(
+                f"    agent_token:\n      iss={fmt_url(agent_claims.get('iss'))}"
+                f"\n      sub={agent_claims.get('sub')}"
+            )
+        print("\n".join(parts), flush=True)
+
+    @app.after_request
+    def _leave(response):
+        if request.method == "POST" and request.path == "/token":
+            detail = ""
+            if response.status_code == 200 and response.is_json:
+                body = response.get_json(silent=True) or {}
+                if "auth_token" in body:
+                    _, claims = peek_jwt(body["auth_token"])
+                    detail = (
+                        f" auth_token:\n      iss={fmt_url(claims.get('iss'))}"
+                        f"\n      aud={fmt_url(claims.get('aud'))}"
+                        f"\n      scope={claims.get('scope')}"
+                    )
+            print(f"  [{label}] -> {response.status_code}{detail}", flush=True)
+        return response
+
+    return app
+
+
 def serve(app: Flask, port: int) -> None:
     threading.Thread(
         target=lambda: app.run(port=port, use_reloader=False), daemon=True
@@ -96,9 +156,9 @@ def wait_for(url: str) -> None:
 def main() -> None:
     serve(create_ap(AP_URL), 5001)
     serve(make_resource(), 5002)
-    serve(create_ps(PS_URL), 5003)
-    serve(create_as(AS_URL, policy=as_policy), 5004)
-    serve(create_sentinel(SENTINEL_URL), 5005)
+    serve(checkpoint(create_ps(PS_URL), "PS"), 5003)
+    serve(checkpoint(create_as(AS_URL, policy=as_policy), "AS"), 5004)
+    serve(checkpoint(create_sentinel(SENTINEL_URL), "sentinel"), 5005)
 
     wait_for(f"{AP_URL}/.well-known/aauth-agent.json")
     wait_for(f"{RESOURCE_URL}/.well-known/aauth-resource.json")
@@ -120,11 +180,11 @@ def main() -> None:
     agent = AgentSession.enroll(AP_URL, "assistant", ps=PS_URL)
     print(f"   enrolled as {agent.agent_id}\n")
 
-    print("3) create auth token (resource /authorize -> PS -> AS):")
+    print("3) create auth token (resource /authorize -> PS -> sentinel -> AS):")
     auth_token = agent.authorize(RESOURCE_URL, "docs.read")
     _, claims = peek_jwt(auth_token)
-    print(f"   -> iss={claims['iss']} aud={claims['aud']} scope={claims['scope']}")
-    print(f"   -> sub present? {'sub' in claims}\n")
+    print(f"   (agent) got auth token iss={claims['iss']} aud={claims['aud']} scope={claims['scope']}")
+    print(f"   (agent) sub present? {'sub' in claims}\n")
     assert claims["iss"] == SENTINEL_URL
     assert claims["aud"] == RESOURCE_URL
     assert claims["scope"] == "docs.read"
@@ -140,7 +200,7 @@ def main() -> None:
     assert body["scope"] == "docs.read"
     assert body["sub"] is None
 
-    print("demo complete: four-party federation via PS -> AS over real HTTP")
+    print("demo complete: four-party federation via PS -> sentinel -> AS over real HTTP")
 
 
 if __name__ == "__main__":

@@ -1,32 +1,27 @@
 """Sentinel: a server for associating AS's with resources based on eDocs.
-Our approach to making data rival"""
+Our approach to making data rival.
+
+To upstream PSes the sentinel looks like an AS (rt.aud = sentinel). Under the
+hood it forwards to the controller AS named on the resource token, treats the
+AS auth token as a throwaway approval signal, and remints its own auth token.
+"""
 
 from __future__ import annotations
 
-from typing import Any, Callable
-
 from flask import Flask, request
 
-from .metadata import JwksResolver
-from .errors import AAuthError, INVALID_REQUEST, INVALID_TOKEN
 from .agent import RequestsTransport
-from .keys import SigningKey
-# from .deferred import PendingStore
-from .metadata import build_metadata
-from .tokens import issue_auth_token
-from .ids import DWK_SENTINEL
-from .httpsig import HttpRequest, verify
-from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
+from .errors import AAuthError, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
+from .httpsig import HttpRequest, peek_jwt, sign_server, verify
+from .ids import DWK_ACCESS, DWK_SENTINEL
 from .keys import SigningKey, jwk_thumbprint
-
-# policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
-Policy = Callable[[str, dict, dict], "str | None | dict[str, Any]"]
+from .metadata import JwksResolver, build_metadata, fetch_metadata
+from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
 
 def create_sentinel(
     issuer: str,
     key: SigningKey | None = None,
-    policy: Policy | None = None,
     transport=None,
     app: Flask | None = None,
     token_path: str = "/token",
@@ -34,8 +29,8 @@ def create_sentinel(
 ) -> Flask:
     app = app or Flask("sentinel")
     key = key or SigningKey.generate(kid="sentinel")
-    resolver = JwksResolver(transport or RequestsTransport())
-    # store = PendingStore(base_path=f"{issuer}{pending_path}")
+    transport = transport or RequestsTransport()
+    resolver = JwksResolver(transport)
     app.extensions["sentinel"] = {"issuer": issuer, "key": key}
 
     if "aauth_as_error_handler" not in app.extensions:
@@ -61,21 +56,19 @@ def create_sentinel(
     def sentinel_jwks():
         return {"keys": [key.public_jwk]}
 
-
     @app.post(token_path, endpoint="aauth_sentinel_token")
     def sentinel_token():
         incoming = HttpRequest(request.method, request.url, dict(request.headers.items()))
         verified = verify(incoming, resolver)
         if verified.header.get("scheme") != "jwks_uri":
-            raise AAuthError(INVALID_TOKEN, 401, "AS token endpoint accepts PS (jwks_uri) calls only")
-        ps_url = verified.claims["iss"]
+            raise AAuthError(INVALID_TOKEN, 401, "sentinel token endpoint accepts PS (jwks_uri) calls only")
 
         body = request.get_json(force=True) or {}
         if "resource_token" not in body or "agent_token" not in body:
             raise AAuthError(INVALID_REQUEST, 400, "resource_token and agent_token are required")
 
         agent_claims = verify_agent_token(body["agent_token"], resolver)
-        rt_claims = verify_resource_token(  # §6.7.2, aud must be this AS
+        rt_claims = verify_resource_token(
             body["resource_token"],
             resolver,
             aud=issuer,
@@ -83,28 +76,75 @@ def create_sentinel(
             agent_jkt=jwk_thumbprint(agent_claims["cnf"]["jwk"]),
         )
 
-        context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
-        granted = rt_claims.get("scope")
+        _check_provenance(rt_claims)
 
-        return _issue(context, granted)
+        controller = rt_claims.get("controller")
+        if not controller:
+            raise AAuthError(INVALID_REQUEST, 400, "resource token missing controller (AS URL)")
 
+        as_token = _forward_to_as(
+            controller,
+            resource_token=body["resource_token"],
+            agent_token=body["agent_token"],
+        )
+        _check_as_token(rt_claims, agent_claims, controller, as_token)
+        return _issue(agent_claims, rt_claims, granted_scope=_scope_of(as_token))
 
-    def _issue(context: dict, granted_scope: str | None, claims: dict | None = None):
-        _check_rule()
+    def _forward_to_as(as_url: str, *, resource_token: str, agent_token: str) -> str:
+        as_md = fetch_metadata(as_url, DWK_ACCESS, transport)
+        req = HttpRequest("POST", as_md.endpoint("token_endpoint"), {})
+        sign_server(req, key, issuer, DWK_SENTINEL)
+        response = transport.request(
+            "POST",
+            req.url,
+            headers=req.headers,
+            json={"resource_token": resource_token, "agent_token": agent_token},
+        )
+        # Pending (202) not supported yet — immediate grant/fail only.
+        if response.status_code == 202:
+            raise AAuthError(
+                INVALID_REQUEST,
+                400,
+                "sentinel does not support AS pending/deferred authorization yet",
+            )
+        if response.status_code != 200:
+            raise AAuthError.from_response(response.status_code, response.json())
+        auth_token = response.json().get("auth_token")
+        if not auth_token:
+            raise AAuthError(SERVER_ERROR, 502, "AS returned no auth_token")
+        return auth_token
+
+    def _check_as_token(rt_claims: dict, agent_claims: dict, as_url: str, auth_token: str) -> None:
+        _, claims = peek_jwt(auth_token)
+        if (
+            claims.get("iss") != as_url
+            or claims.get("aud") != rt_claims["iss"]
+            or claims.get("agent") != agent_claims["sub"]
+            or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
+            or not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split())
+        ):
+            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+
+    def _issue(agent_claims: dict, rt_claims: dict, granted_scope: str | None) -> dict:
         token = issue_auth_token(
             issuer=issuer,
             dwk=DWK_SENTINEL,
-            aud=context["rt_claims"]["iss"],
-            agent=context["agent_claims"]["sub"],
-            cnf_jwk=context["agent_claims"]["cnf"]["jwk"],
+            aud=rt_claims["iss"],
+            agent=agent_claims["sub"],
+            cnf_jwk=agent_claims["cnf"]["jwk"],
             scope=granted_scope,
-            sub=(claims or {}).get("sub"),
-            mission=context["rt_claims"].get("mission"),
+            mission=rt_claims.get("mission"),
             key=key,
         )
         return {"auth_token": token, "expires_in": 3600}
 
-
-    def _check_rule():
-        return True
     return app
+
+
+def _check_provenance(rt_claims: dict) -> None:
+    """Future: enforce that controllers match the provenance registry."""
+    return None
+
+
+def _scope_of(auth_token: str) -> str | None:
+    return peek_jwt(auth_token)[1].get("scope")

@@ -383,9 +383,9 @@ def create_ps(
             )
             return {"auth_token": token, "expires_in": 3600}
 
-        # four-party: federate with the AS the resource named (§9.3)
+        # four-party: federate with the AS/sentinel the resource named (§9.3)
         as_url = rt_claims["aud"]
-        as_md = fetch_metadata(as_url, DWK_SENTINEL, transport)
+        as_md = _fetch_grant_metadata(as_url, transport)
         req = HttpRequest("POST", as_md.endpoint("token_endpoint"), {})
         sign_server(req, key, issuer, DWK_PERSON)
         response = transport.request(
@@ -466,6 +466,17 @@ def create_ps(
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
 
     return app
+
+
+def _fetch_grant_metadata(issuer: str, transport):
+    """Discover token endpoint at aud: classic AS or eDocs sentinel."""
+    last_error = None
+    for dwk in (DWK_ACCESS, DWK_SENTINEL):
+        try:
+            return fetch_metadata(issuer, dwk, transport)
+        except AAuthError as error:
+            last_error = error
+    raise last_error or AAuthError(SERVER_ERROR, 502, f"no grant metadata at {issuer}")
 
 
 def _incoming() -> HttpRequest:

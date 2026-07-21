@@ -30,7 +30,8 @@ class ResourceConfig:
     issuer: str
     key: SigningKey
     key_resolver: KeyResolver
-    as_url: str | None = None  # set -> four-party (aud=AS); unset -> three-party (aud=agent's PS)
+    as_url: str | None = None  # grant audience: AS (four-party) or sentinel (eDocs); unset -> three-party (agent's PS)
+    controller_url: str | None = None  # controller AS when as_url is a sentinel
     default_scope: str = "access"
 
 
@@ -74,7 +75,8 @@ def install_resource(app: Flask, config: ResourceConfig) -> None:
 
 def _mint_resource_token(config: ResourceConfig, verified: VerifiedRequest, scope: str) -> str:
     """Issue a resource token for the verified agent (§6.2.2): aud is the
-    resource's AS when it has one, else the agent's declared PS."""
+    resource's AS/sentinel when it has one, else the agent's declared PS.
+    When aud is a sentinel, `controller` names the controller AS."""
     aud = config.as_url or verified.claims.get("ps")
     if not aud:
         raise AAuthError(INVALID_REQUEST, 400, "agent has no ps claim and resource has no AS")
@@ -84,6 +86,7 @@ def _mint_resource_token(config: ResourceConfig, verified: VerifiedRequest, scop
         agent=verified.claims["sub"],
         agent_jkt=jwk_thumbprint(verified.claims["cnf"]["jwk"]),
         scope=scope,
+        controller=config.controller_url,
         key=config.key,
     )
 
