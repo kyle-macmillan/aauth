@@ -57,6 +57,13 @@ def fmt_url(url: str | None) -> str:
     name = PARTY_NAMES.get(url)
     return f"{url} ({name})" if name else url
 
+
+def fmt_claim(value) -> str:
+    if isinstance(value, str) and value.startswith(("http://", "https://")):
+        return fmt_url(value)
+    return str(value)
+
+
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 
@@ -94,44 +101,42 @@ def as_policy(ps_url, agent_claims, rt_claims):
 
 
 def checkpoint(app: Flask, label: str) -> Flask:
-    """Print enter/exit on POST /token so the PS -> sentinel -> AS hop is visible."""
+    """Print every request; for POST /token also dump token iss/aud details."""
 
     @app.before_request
     def _enter():
+        print(f"  [{label}] {request.method} {request.path}", flush=True)
         if request.method != "POST" or request.path != "/token":
             return
         body = request.get_json(silent=True) or {}
-        parts = [f"  [{label}] POST /token"]
+        parts = []
         if rt := body.get("resource_token"):
             _, rt_claims = peek_jwt(rt)
-            parts.append(
-                f"    resource_token:\n      iss={fmt_url(rt_claims.get('iss'))}"
-                f"\n      aud={fmt_url(rt_claims.get('aud'))}"
-                f"\n      controller={fmt_url(rt_claims.get('controller'))}"
-                f"\n      scope={rt_claims.get('scope')}"
-            )
+            lines = "\n".join(f"      {k}={fmt_claim(v)}" for k, v in rt_claims.items())
+            parts.append(f"    resource_token:\n{lines}")
         if at := body.get("agent_token"):
             _, agent_claims = peek_jwt(at)
-            parts.append(
-                f"    agent_token:\n      iss={fmt_url(agent_claims.get('iss'))}"
-                f"\n      sub={agent_claims.get('sub')}"
-            )
-        print("\n".join(parts), flush=True)
+            lines = "\n".join(f"      {k}={fmt_claim(v)}" for k, v in agent_claims.items())
+            parts.append(f"    agent_token:\n{lines}")
+        if parts:
+            print("\n".join(parts), flush=True)
 
     @app.after_request
     def _leave(response):
-        if request.method == "POST" and request.path == "/token":
-            detail = ""
+        detail = ""
+        if request.method == "GET":
+            body = response.get_json(silent=True) or {}
+            if body:
+                lines = "\n".join(f"      {k}={fmt_claim(v)}" for k, v in body.items())
+                detail = f" payload:\n{lines}"
+        elif request.method == "POST" and request.path == "/token":
             if response.status_code == 200 and response.is_json:
                 body = response.get_json(silent=True) or {}
                 if "auth_token" in body:
                     _, claims = peek_jwt(body["auth_token"])
-                    detail = (
-                        f" auth_token:\n      iss={fmt_url(claims.get('iss'))}"
-                        f"\n      aud={fmt_url(claims.get('aud'))}"
-                        f"\n      scope={claims.get('scope')}"
-                    )
-            print(f"  [{label}] -> {response.status_code}{detail}", flush=True)
+                    lines = "\n".join(f"      {k}={fmt_claim(v)}" for k, v in claims.items())
+                    detail = f" auth_token:\n{lines}"
+        print(f"  [{label}] response {response.status_code}{detail}", flush=True)
         return response
 
     return app
