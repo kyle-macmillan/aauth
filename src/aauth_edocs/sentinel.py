@@ -132,6 +132,9 @@ def create_sentinel(
         return _issue(agent_claims, rt_claims, as_token)
 
     def _forward_to_as(as_url: str, *, resource_token: str, agent_token: str) -> str:
+        """
+        Sends resource and agent tokens to AS to get an auth token.
+        """
         as_md = fetch_metadata(as_url, DWK_ACCESS, transport)
         req = HttpRequest("POST", as_md.endpoint("token_endpoint"), {})
         sign_server(req, key, issuer, DWK_SENTINEL)
@@ -156,6 +159,10 @@ def create_sentinel(
         return auth_token
 
     def _check_as_token(rt_claims: dict, agent_claims: dict, as_url: str, auth_token: str) -> None:
+        """
+        Checks that the AS returned a token that matches the request. Raises error
+        if the token does not match the request. Otherwise, returns nothing.
+        """
         _, claims = peek_jwt(auth_token)
         if (
             claims.get("iss") != as_url
