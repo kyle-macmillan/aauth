@@ -42,6 +42,17 @@ def create_sentinel(
 
     @app.get("/.well-known/aauth-sentinel.json", endpoint="aauth_as_metadata")
     def sentinel_metadata():
+        """
+        Metadata endpoint to get the metadata for the
+        sentinel.
+
+        Response:
+        - issuer: str
+        - jwks_uri: str
+        - token_endpoint: str
+        - name: str
+        - dwk: str
+        """
         return dict(
             build_metadata(
                 issuer=issuer,
@@ -54,10 +65,39 @@ def create_sentinel(
 
     @app.get(jwks_path, endpoint="aauth_as_jwks")
     def sentinel_jwks():
+        """
+        Sentinel JWKS endpoint to get the JWKS for the
+        sentinel.
+
+        Response:
+        - keys: list[dict]
+        """
         return {"keys": [key.public_jwk]}
 
     @app.post(token_path, endpoint="aauth_sentinel_token")
     def sentinel_token():
+        """
+        Endpoint that the PS calls to get an auth token
+        for the agent to use for the resource.
+
+        Function Logic:
+        1. Verify the incoming request is signed by PS.
+        2. Verify both resource and agent tokens are present.
+        3. Verify resource and agent tokens are valid.
+        4. Check that controller is present.
+        5. Check provenance of the proposed dataflow matches internal provenance.
+        6. Forward the tokens to the AS.
+        7. Check that the AS returned a token.
+        8. Issue a new auth token for the agent to use for the resource.
+
+        Request (HTTP-signed by the PS, jwks_uri):
+        - resource_token: str
+        - agent_token: str
+
+        Response:
+        - auth_token: str
+        - expires_in: int
+        """
         incoming = HttpRequest(request.method, request.url, dict(request.headers.items()))
         verified = verify(incoming, resolver)
         if verified.header.get("scheme") != "jwks_uri":
@@ -76,11 +116,12 @@ def create_sentinel(
             agent_jkt=jwk_thumbprint(agent_claims["cnf"]["jwk"]),
         )
 
-        _check_provenance(rt_claims)
-
         controller = rt_claims.get("controller")
         if not controller:
             raise AAuthError(INVALID_REQUEST, 400, "resource token missing controller (AS URL)")
+
+        _check_provenance(rt_claims, controller)
+
 
         as_token = _forward_to_as(
             controller,
@@ -141,7 +182,7 @@ def create_sentinel(
     return app
 
 
-def _check_provenance(rt_claims: dict) -> None:
+def _check_provenance(rt_claims: dict, controller: str) -> None:
     """Future: enforce that controllers match the provenance registry."""
     return None
 
