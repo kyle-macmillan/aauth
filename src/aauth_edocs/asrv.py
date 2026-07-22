@@ -24,8 +24,8 @@ from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
-# policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
-Policy = Callable[[str, dict, dict], "str | None | dict[str, Any]"]
+# policy(...) -> granted scope str | granted dataflow dict | None (deny) | deferred dict (has "requirement")
+Policy = Callable[[str, dict, dict], "str | dict[str, Any] | None"]
 
 
 def create_as(
@@ -54,6 +54,17 @@ def create_as(
 
     @app.get("/.well-known/aauth-access.json", endpoint="aauth_as_metadata")
     def as_metadata():
+        """
+        Metadata endpoint to get the metadata for the AS.
+
+        Response:
+        - issuer: str
+        - jwks_uri: str
+        - token_endpoint: str
+        - name: str
+        - dwk: str
+        """
+
         return dict(
             build_metadata(
                 issuer,
@@ -65,6 +76,13 @@ def create_as(
 
     @app.get(jwks_path, endpoint="aauth_as_jwks")
     def as_jwks():
+        """
+        AS JWKS endpoint to get the JWKS for the AS.
+
+        Response:
+        - keys: list[dict]
+        """
+
         return {"keys": [key.public_jwk]}
 
     @app.post(token_path, endpoint="aauth_as_token")
@@ -110,10 +128,11 @@ def create_as(
         )
 
         context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
-        granted = policy(ps_url, agent_claims, rt_claims) if policy else rt_claims.get("scope")
+        default_grant = rt_claims["dataflow"] if rt_claims.get("dataflow") is not None else rt_claims.get("scope")
+        granted = policy(ps_url, agent_claims, rt_claims) if policy else default_grant
         if granted is None:
             raise AAuthError("denied", 403, "resource policy denied the request")
-        if isinstance(granted, dict):
+        if isinstance(granted, dict) and "requirement" in granted:
             return _defer(granted, context)
 
         return _issue(context, granted)
@@ -131,15 +150,20 @@ def create_as(
         body = request.get_json(force=True) or {}
         requirement = context["requirement"]
         if requirement == CLAIMS:
-            result = _issue(context, context["rt_claims"].get("scope"), claims=body.get("claims") or {})
+            result = _issue(context, _default_grant(context["rt_claims"]), claims=body.get("claims") or {})
             store.resolve(pid, result)
             return {"status": "recorded"}
         decision = body.get("decision")
         if decision == "grant":
-            store.resolve(pid, _issue(context, context["rt_claims"].get("scope")))
+            store.resolve(pid, _issue(context, _default_grant(context["rt_claims"])))
         else:
             store.deny(pid, detail=f"{requirement} denied")
         return {"status": "recorded"}
+
+    def _default_grant(rt_claims: dict):
+        if rt_claims.get("dataflow") is not None:
+            return rt_claims["dataflow"]
+        return rt_claims.get("scope")
 
     def _defer(policy_result: dict, context: dict):
         requirement = policy_result.get("requirement")
@@ -161,19 +185,35 @@ def create_as(
         response_body.update(body)
         return response_body, status, headers
 
-    def _issue(context: dict, granted_scope: str | None, claims: dict | None = None):
-        _check_scope(granted_scope, context["rt_claims"].get("scope"))
-        token = issue_auth_token(
-            issuer=issuer,
-            dwk=DWK_ACCESS,
-            aud=context["rt_claims"]["iss"],
-            agent=context["agent_claims"]["sub"],
-            cnf_jwk=context["agent_claims"]["cnf"]["jwk"],
-            scope=granted_scope,
-            sub=(claims or {}).get("sub"),
-            mission=context["rt_claims"].get("mission"),
-            key=key,
-        )
+    def _issue(context: dict, granted, claims: dict | None = None):
+        rt_claims = context["rt_claims"]
+        if rt_claims.get("dataflow") is not None:
+            if granted != rt_claims["dataflow"]:
+                raise AAuthError("denied", 403, "AS granted dataflow does not match resource token")
+            token = issue_auth_token(
+                issuer=issuer,
+                dwk=DWK_ACCESS,
+                aud=rt_claims["iss"],
+                agent=context["agent_claims"]["sub"],
+                cnf_jwk=context["agent_claims"]["cnf"]["jwk"],
+                dataflow=granted,
+                sub=(claims or {}).get("sub"),
+                mission=rt_claims.get("mission"),
+                key=key,
+            )
+        else:
+            _check_scope(granted, rt_claims.get("scope"))
+            token = issue_auth_token(
+                issuer=issuer,
+                dwk=DWK_ACCESS,
+                aud=rt_claims["iss"],
+                agent=context["agent_claims"]["sub"],
+                cnf_jwk=context["agent_claims"]["cnf"]["jwk"],
+                scope=granted,
+                sub=(claims or {}).get("sub"),
+                mission=rt_claims.get("mission"),
+                key=key,
+            )
         return {"auth_token": token, "expires_in": 3600}
 
     def _check_scope(granted: str | None, requested: str | None) -> None:

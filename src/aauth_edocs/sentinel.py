@@ -129,7 +129,7 @@ def create_sentinel(
             agent_token=body["agent_token"],
         )
         _check_as_token(rt_claims, agent_claims, controller, as_token)
-        return _issue(agent_claims, rt_claims, granted_scope=_scope_of(as_token))
+        return _issue(agent_claims, rt_claims, as_token)
 
     def _forward_to_as(as_url: str, *, resource_token: str, agent_token: str) -> str:
         as_md = fetch_metadata(as_url, DWK_ACCESS, transport)
@@ -162,21 +162,38 @@ def create_sentinel(
             or claims.get("aud") != rt_claims["iss"]
             or claims.get("agent") != agent_claims["sub"]
             or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
-            or not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split())
         ):
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        if rt_claims.get("dataflow") is not None:
+            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
+                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
+            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
 
-    def _issue(agent_claims: dict, rt_claims: dict, granted_scope: str | None) -> dict:
-        token = issue_auth_token(
-            issuer=issuer,
-            dwk=DWK_SENTINEL,
-            aud=rt_claims["iss"],
-            agent=agent_claims["sub"],
-            cnf_jwk=agent_claims["cnf"]["jwk"],
-            scope=granted_scope,
-            mission=rt_claims.get("mission"),
-            key=key,
-        )
+    def _issue(agent_claims: dict, rt_claims: dict, as_token: str) -> dict:
+        _, as_claims = peek_jwt(as_token)
+        if rt_claims.get("dataflow") is not None:
+            token = issue_auth_token(
+                issuer=issuer,
+                dwk=DWK_SENTINEL,
+                aud=rt_claims["iss"],
+                agent=agent_claims["sub"],
+                cnf_jwk=agent_claims["cnf"]["jwk"],
+                dataflow=as_claims["dataflow"],
+                mission=rt_claims.get("mission"),
+                key=key,
+            )
+        else:
+            token = issue_auth_token(
+                issuer=issuer,
+                dwk=DWK_SENTINEL,
+                aud=rt_claims["iss"],
+                agent=agent_claims["sub"],
+                cnf_jwk=agent_claims["cnf"]["jwk"],
+                scope=as_claims.get("scope"),
+                mission=rt_claims.get("mission"),
+                key=key,
+            )
         return {"auth_token": token, "expires_in": 3600}
 
     return app
@@ -185,7 +202,3 @@ def create_sentinel(
 def _check_provenance(rt_claims: dict, controller: str) -> None:
     """Future: enforce that controllers match the provenance registry."""
     return None
-
-
-def _scope_of(auth_token: str) -> str | None:
-    return peek_jwt(auth_token)[1].get("scope")

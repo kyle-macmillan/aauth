@@ -47,7 +47,7 @@ def issue_agent_token(
     lifetime: int = 24 * 3600,
     now: Now = time.time,
 ) -> str:
-    """Agent-provider side: bind `agent_jwk` to the agent identifier (ยง5.2.2)."""
+    """Agent-provider side: bind `agent_jwk` to the agent identifier (?5.2.2)."""
     return _issue(
         AGENT_TYP,
         key,
@@ -64,14 +64,34 @@ def issue_agent_token(
     )
 
 
+def validate_dataflow(dataflow: dict) -> dict:
+    """Require ``{"data": <any JSON>, "function": <str>}``."""
+    if not isinstance(dataflow, dict) or "data" not in dataflow or "function" not in dataflow:
+        raise ValueError("dataflow must be a dict with data and function")
+    if not isinstance(dataflow["function"], str):
+        raise ValueError("dataflow.function must be a string")
+    return dataflow
+
+
+def _require_scope_xor_dataflow(*, scope: str | None, dataflow: dict | None) -> tuple[str | None, dict | None]:
+    has_scope = scope is not None
+    has_dataflow = dataflow is not None
+    if has_scope == has_dataflow:
+        raise ValueError("exactly one of scope or dataflow is required")
+    if has_dataflow:
+        dataflow = validate_dataflow(dataflow)
+    return scope, dataflow
+
+
 def issue_resource_token(
     *,
     issuer: str,
     aud: str,
     agent: str,
     agent_jkt: str,
-    scope: str,
     key: SigningKey,
+    scope: str | None = None,
+    dataflow: dict | None = None,
     mission: dict | None = None,
     interaction: dict | None = None,
     controller: str | None = None,
@@ -84,7 +104,10 @@ def issue_resource_token(
     (eDocs). When `aud` is a sentinel, `controller` is the controller AS URL.
     `mission` is a mission-reference claim dict when the agent sent
     AAuth-Mission (?8.7).
+
+    Exactly one of `scope` or `dataflow` is required (mutually exclusive).
     """
+    scope, dataflow = _require_scope_xor_dataflow(scope=scope, dataflow=dataflow)
     return _issue(
         RESOURCE_TYP,
         key,
@@ -95,6 +118,7 @@ def issue_resource_token(
             "agent": agent,
             "agent_jkt": agent_jkt,
             "scope": scope,
+            "dataflow": dataflow,
             "mission": mission,
             "interaction": interaction,
             "controller": controller,
@@ -113,6 +137,7 @@ def issue_auth_token(
     cnf_jwk: dict,
     sub: str | None = None,
     scope: str | None = None,
+    dataflow: dict | None = None,
     mission: dict | None = None,
     act: dict | None = None,
     key: SigningKey,
@@ -122,12 +147,11 @@ def issue_auth_token(
     """PS/AS side: grant the agent access to `aud` (?9.4.1).
 
     `dwk` is aauth-person.json (PS-issued) or aauth-access.json (AS-issued).
-    At least one of sub/scope is required.
+    Exactly one of scope/dataflow is required; `sub` is optional alongside either.
     """
     if dwk not in (DWK_PERSON, DWK_ACCESS, DWK_SENTINEL):
         raise ValueError("auth token dwk must be aauth-person.json or aauth-access.json")
-    if sub is None and scope is None:
-        raise ValueError("auth token needs at least one of sub or scope")
+    scope, dataflow = _require_scope_xor_dataflow(scope=scope, dataflow=dataflow)
     return _issue(
         AUTH_TYP,
         key,
@@ -139,6 +163,7 @@ def issue_auth_token(
             "cnf": {"jwk": cnf_jwk},
             "sub": sub,
             "scope": scope,
+            "dataflow": dataflow,
             "mission": mission,
             "act": act,
         },
@@ -237,14 +262,21 @@ def verify_auth_token(
 ) -> dict:
     """Resource-side auth token verification (?9.4.3, simplified): typ, an
     issuer dwk of person/access, aud = me, cnf.jwk = the request's signing
-    key, and at least one of sub/scope."""
+    key, and exactly one of scope/dataflow (sub optional)."""
     claims = _decode(token, key_resolver, AUTH_TYP, now)
     if claims.get("dwk") not in (DWK_PERSON, DWK_ACCESS, DWK_SENTINEL):
         raise AAuthError(INVALID_TOKEN, detail=f"auth token dwk {claims.get('dwk')!r} not recognized")
     if claims.get("aud") != aud:
         raise AAuthError(INVALID_TOKEN, detail=f"auth token aud is {claims.get('aud')}, not us")
-    if "sub" not in claims and "scope" not in claims:
-        raise AAuthError(INVALID_TOKEN, detail="auth token has neither sub nor scope")
+    has_scope = "scope" in claims
+    has_dataflow = "dataflow" in claims
+    if has_scope == has_dataflow:
+        raise AAuthError(INVALID_TOKEN, detail="auth token needs exactly one of scope or dataflow")
+    if has_dataflow:
+        try:
+            validate_dataflow(claims["dataflow"])
+        except ValueError as error:
+            raise AAuthError(INVALID_TOKEN, detail=str(error)) from error
     if signing_jwk is not None:
         _check_cnf(claims, signing_jwk)
     return claims

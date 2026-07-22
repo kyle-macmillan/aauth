@@ -124,12 +124,64 @@ def test_auth_token_roundtrip(ps_key, agent_key, agent, resolver):
     assert claims["agent"] == agent
 
 
-def test_auth_token_needs_sub_or_scope(ps_key, agent_key, agent):
-    with pytest.raises(ValueError, match="sub or scope"):
+def test_auth_token_needs_scope_or_dataflow(ps_key, agent_key, agent):
+    with pytest.raises(ValueError, match="exactly one of scope or dataflow"):
         issue_auth_token(
             issuer=PS, dwk="aauth-person.json", aud=RESOURCE, agent=agent,
             cnf_jwk=agent_key.public_jwk, key=ps_key,
         )
+    with pytest.raises(ValueError, match="exactly one of scope or dataflow"):
+        issue_auth_token(
+            issuer=PS, dwk="aauth-person.json", aud=RESOURCE, agent=agent,
+            cnf_jwk=agent_key.public_jwk, scope="data.read",
+            dataflow={"data": "x", "function": "read"}, key=ps_key,
+        )
+
+
+def test_resource_token_dataflow_xor_scope(resource_key, agent_key, agent):
+    with pytest.raises(ValueError, match="exactly one of scope or dataflow"):
+        issue_resource_token(
+            issuer=RESOURCE, aud=PS, agent=agent, agent_jkt=agent_key.thumbprint, key=resource_key
+        )
+    with pytest.raises(ValueError, match="exactly one of scope or dataflow"):
+        issue_resource_token(
+            issuer=RESOURCE,
+            aud=PS,
+            agent=agent,
+            agent_jkt=agent_key.thumbprint,
+            scope="data.read",
+            dataflow={"data": "x", "function": "read"},
+            key=resource_key,
+        )
+
+
+def test_resource_and_auth_token_dataflow_roundtrip(resource_key, ps_key, agent_key, agent, resolver):
+    dataflow = {"data": "patient-42", "function": "avg_bp"}
+    rt = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        dataflow=dataflow,
+        key=resource_key,
+    )
+    rt_claims = verify_resource_token(rt, resolver, aud=PS, agent=agent, agent_jkt=agent_key.thumbprint)
+    assert rt_claims["dataflow"] == dataflow
+    assert "scope" not in rt_claims
+
+    at = issue_auth_token(
+        issuer=PS,
+        dwk="aauth-person.json",
+        aud=RESOURCE,
+        agent=agent,
+        cnf_jwk=agent_key.public_jwk,
+        sub="user-123",
+        dataflow=dataflow,
+        key=ps_key,
+    )
+    claims = verify_auth_token(at, resolver, aud=RESOURCE, signing_jwk=agent_key.public_jwk)
+    assert claims["dataflow"] == dataflow
+    assert "scope" not in claims
 
 
 def test_auth_token_wrong_aud_and_cnf(ps_key, agent_key, agent, resolver):
@@ -137,7 +189,7 @@ def test_auth_token_wrong_aud_and_cnf(ps_key, agent_key, agent, resolver):
 
     at = issue_auth_token(
         issuer=PS, dwk="aauth-person.json", aud=RESOURCE, agent=agent,
-        cnf_jwk=agent_key.public_jwk, sub="u", key=ps_key,
+        cnf_jwk=agent_key.public_jwk, sub="u", scope="data.read", key=ps_key,
     )
     with pytest.raises(AAuthError, match="aud"):
         verify_auth_token(at, resolver, aud="https://other.example")

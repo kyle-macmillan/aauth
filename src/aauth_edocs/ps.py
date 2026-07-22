@@ -13,6 +13,7 @@ in for the user's consent UI when the policy defers.
 from __future__ import annotations
 
 import hashlib
+import json
 from typing import Callable
 
 from flask import Flask, request, session
@@ -35,6 +36,10 @@ PermissionPolicy = Callable[[dict, dict], str]
 def directed_sub(person: str, resource: str) -> str:
     """Pairwise pseudonymous user id per resource (§15.1)."""
     return "u_" + hashlib.sha256(f"{person}|{resource}".encode()).hexdigest()[:16]
+
+
+def _canonical_dataflow(dataflow: dict) -> str:
+    return json.dumps(dataflow, sort_keys=True, separators=(",", ":"))
 
 
 def create_ps(
@@ -168,10 +173,17 @@ def create_ps(
             "subagent_claims": subagent_claims,
             "agent_token": presented_token,
             "requested_scope": body.get("scope"),
+            "requested_dataflow": body.get("dataflow"),
             "clarification_rounds": 0,
             "upstream_claims": upstream_claims,
             "act_agent": act_agent,
         }
+        if rt_claims.get("dataflow") is not None:
+            if body.get("scope") is not None:
+                raise AAuthError(INVALID_REQUEST, 400, "scope is not allowed when resource token has dataflow")
+            requested_df = body.get("dataflow")
+            if requested_df is not None and requested_df != rt_claims["dataflow"]:
+                raise AAuthError(DENIED, 403, "requested dataflow does not match resource token")
         _check_binding(context)
         if _consent_key(context) in consents:
             if rt_claims.get("interaction"):
@@ -316,7 +328,11 @@ def create_ps(
     def _consent_key(context: dict) -> tuple[str, str, str, str]:
         rt_claims = context["rt_claims"]
         agent_claims = context.get("subagent_claims") or context["agent_claims"]
-        return person, agent_claims["sub"], rt_claims["iss"], rt_claims.get("scope") or ""
+        if rt_claims.get("dataflow") is not None:
+            grant = _canonical_dataflow(rt_claims["dataflow"])
+        else:
+            grant = rt_claims.get("scope") or ""
+        return person, agent_claims["sub"], rt_claims["iss"], grant
 
     def _granted_scope(context: dict) -> str | None:
         rt_scope = context["rt_claims"].get("scope")
@@ -328,6 +344,9 @@ def create_ps(
         if not requested_set <= allowed:
             raise AAuthError(DENIED, 403, "requested scope exceeds resource token scope")
         return requested
+
+    def _granted_dataflow(context: dict) -> dict:
+        return context["rt_claims"]["dataflow"]
 
     def _defer_clarification(context: dict):
         if context["clarification_rounds"] >= 5:
@@ -369,18 +388,32 @@ def create_ps(
         act = {"agent": context["act_agent"]} if context.get("act_agent") else None
 
         if rt_claims["aud"] == issuer and "aauth_as" not in app.extensions:  # three-party: PS asserts identity (§7.1.4)
-            token = issue_auth_token(
-                issuer=issuer,
-                dwk=DWK_PERSON,
-                aud=resource,
-                agent=agent_claims["sub"],
-                cnf_jwk=agent_claims["cnf"]["jwk"],
-                sub=directed_sub(person, resource),
-                scope=_granted_scope(context),
-                mission=rt_claims.get("mission"),
-                act=act,
-                key=key,
-            )
+            if rt_claims.get("dataflow") is not None:
+                token = issue_auth_token(
+                    issuer=issuer,
+                    dwk=DWK_PERSON,
+                    aud=resource,
+                    agent=agent_claims["sub"],
+                    cnf_jwk=agent_claims["cnf"]["jwk"],
+                    sub=directed_sub(person, resource),
+                    dataflow=_granted_dataflow(context),
+                    mission=rt_claims.get("mission"),
+                    act=act,
+                    key=key,
+                )
+            else:
+                token = issue_auth_token(
+                    issuer=issuer,
+                    dwk=DWK_PERSON,
+                    aud=resource,
+                    agent=agent_claims["sub"],
+                    cnf_jwk=agent_claims["cnf"]["jwk"],
+                    sub=directed_sub(person, resource),
+                    scope=_granted_scope(context),
+                    mission=rt_claims.get("mission"),
+                    act=act,
+                    key=key,
+                )
             return {"auth_token": token, "expires_in": 3600}
 
         # four-party: federate with the AS/sentinel the resource named (§9.3)
@@ -456,13 +489,18 @@ def create_ps(
     def _check_as_token(context: dict, as_url: str, resource: str, agent_claims: dict, auth_token: str) -> None:
         # §9.1.3-lite: sanity-check what the AS issued before relaying
         _, claims = peek_jwt(auth_token)
+        rt_claims = context["rt_claims"]
         if (
             claims.get("iss") != as_url
             or claims.get("aud") != resource
             or claims.get("agent") != agent_claims["sub"]
             or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
-            or not set((claims.get("scope") or "").split()) <= set((context["rt_claims"].get("scope") or "").split())
         ):
+            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        if rt_claims.get("dataflow") is not None:
+            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
+                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
 
     return app

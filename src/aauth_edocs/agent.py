@@ -172,16 +172,27 @@ class AgentSession:
         return self.request("POST", url, **kwargs)
 
     # -- authorization (§6.1 + §7.1) ------------------------------------------
-    def authorize(self, resource_url: str, scope: str) -> str:
+    def authorize(
+        self,
+        resource_url: str,
+        scope: str | None = None,
+        dataflow: dict | None = None,
+    ) -> str:
         """Proactive path: request a resource token at the resource's
-        authorization endpoint, then exchange it at the PS."""
+        authorization endpoint, then exchange it at the PS.
+
+        Exactly one of `scope` or `dataflow` is required.
+        """
+        if (scope is None) == (dataflow is None):
+            raise AAuthError(INVALID_REQUEST, 400, "exactly one of scope or dataflow is required")
         md = fetch_metadata(resource_url, "aauth-resource.json", self.transport)
         endpoint = md.endpoint("authorization_endpoint")
         if not endpoint:
             raise AAuthError(INVALID_REQUEST, 400, f"{resource_url} has no authorization_endpoint")
         req = HttpRequest("POST", endpoint, {})
         sign(req, self.key, self.agent_token)
-        response = self.transport.request("POST", endpoint, headers=req.headers, json={"scope": scope})
+        body = {"dataflow": dataflow} if dataflow is not None else {"scope": scope}
+        response = self.transport.request("POST", endpoint, headers=req.headers, json=body)
         if response.status_code != 200:
             raise AAuthError.from_response(response.status_code, response.json())
         resource_token = response.json()["resource_token"]

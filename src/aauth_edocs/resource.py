@@ -5,7 +5,7 @@ caller by agent token alone. Three-/four-party access (§4.1.3/.4):
 `install_resource` adds JWKS + an authorization endpoint that issues resource
 tokens (§6.1–6.2), and `require_auth_token` enforces auth tokens, answering
 agent-token-signed requests with the §6.6 challenge. Access-control decisions
-beyond scope containment belong in the view (see flask.g.aauth).
+beyond scope/dataflow containment belong in the view (see flask.g.aauth).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from .headers import AGENT_TOKEN, AUTH_TOKEN, REQUIREMENT_HEADER, build_requirem
 from .httpsig import HttpRequest, KeyResolver, VerifiedRequest, verify
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import build_metadata
-from .tokens import AGENT_TYP, AUTH_TYP, issue_resource_token, verify_auth_token
+from .tokens import AGENT_TYP, AUTH_TYP, issue_resource_token, validate_dataflow, verify_auth_token
 
 
 @dataclass
@@ -60,20 +60,33 @@ def install_resource(app: Flask, config: ResourceConfig) -> None:
 
     @app.post("/authorize")
     def authorization_endpoint():
-        # §6.1: signed POST {"scope": ...}; agent identity from the signature
+        # §6.1: signed POST with exactly one of scope or dataflow; agent from signature
         try:
             verified = verify(_incoming_request(), config.key_resolver)
             if verified.header.get("typ") != AGENT_TYP:
                 raise AAuthError(INVALID_TOKEN, 401, "authorization endpoint expects an agent token")
-            scope = (request.get_json(force=True) or {}).get("scope")
-            if not scope:
-                raise AAuthError(INVALID_REQUEST, 400, "scope is required")
-            return {"resource_token": _mint_resource_token(config, verified, scope)}
+            body = request.get_json(force=True) or {}
+            scope = body.get("scope")
+            dataflow = body.get("dataflow")
+            if (scope is None) == (dataflow is None):
+                raise AAuthError(INVALID_REQUEST, 400, "exactly one of scope or dataflow is required")
+            if dataflow is not None:
+                try:
+                    dataflow = validate_dataflow(dataflow)
+                except ValueError as error:
+                    raise AAuthError(INVALID_REQUEST, 400, str(error)) from error
+            return {"resource_token": _mint_resource_token(config, verified, scope=scope, dataflow=dataflow)}
         except AAuthError as error:
             return error.body(), error.status
 
 
-def _mint_resource_token(config: ResourceConfig, verified: VerifiedRequest, scope: str) -> str:
+def _mint_resource_token(
+    config: ResourceConfig,
+    verified: VerifiedRequest,
+    *,
+    scope: str | None = None,
+    dataflow: dict | None = None,
+) -> str:
     """Issue a resource token for the verified agent (§6.2.2): aud is the
     resource's AS/sentinel when it has one, else the agent's declared PS.
     When aud is a sentinel, `controller` names the controller AS."""
@@ -86,6 +99,7 @@ def _mint_resource_token(config: ResourceConfig, verified: VerifiedRequest, scop
         agent=verified.claims["sub"],
         agent_jkt=jwk_thumbprint(verified.claims["cnf"]["jwk"]),
         scope=scope,
+        dataflow=dataflow,
         controller=config.controller_url,
         key=config.key,
     )
@@ -120,14 +134,23 @@ def require_aauth_identity(key_resolver: KeyResolver, expect_typ: str = AGENT_TY
     return decorator
 
 
-def require_auth_token(config: ResourceConfig, scope: str | None = None):
+def require_auth_token(
+    config: ResourceConfig,
+    scope: str | None = None,
+    dataflow: dict | None = None,
+):
     """Decorator factory for auth-token-protected endpoints (§6.6, §9.4.3).
 
-    Auth-token-signed request -> verify (aud = this resource) + optional
-    scope containment, then run the view with g.aauth set. Agent-token-signed
+    Exactly one of `scope` or `dataflow` is required on the decorator.
+    Auth-token-signed request -> verify (aud = this resource) + matching
+    grant claim, then run the view with g.aauth set. Agent-token-signed
     request -> 401 challenge carrying a fresh resource token. Anything else
     -> 401 requirement=agent-token.
     """
+    if (scope is None) == (dataflow is None):
+        raise ValueError("exactly one of scope or dataflow is required")
+    if dataflow is not None:
+        dataflow = validate_dataflow(dataflow)
 
     def decorator(view):
         @functools.wraps(view)
@@ -142,12 +165,15 @@ def require_auth_token(config: ResourceConfig, scope: str | None = None):
             try:
                 if typ == AUTH_TYP:
                     claims = verify_auth_token(verified.token, config.key_resolver, aud=config.issuer)
-                    if scope and scope not in (claims.get("scope") or "").split():
+                    if dataflow is not None:
+                        if claims.get("dataflow") != dataflow:
+                            raise AAuthError(DENIED, 403, "dataflow not granted")
+                    elif scope not in (claims.get("scope") or "").split():
                         raise AAuthError(DENIED, 403, f"scope {scope!r} not granted")
                     g.aauth = verified
                     return view(*args, **kwargs)
                 if typ == AGENT_TYP:  # §6.6: challenge with a fresh resource token
-                    token = _mint_resource_token(config, verified, scope or config.default_scope)
+                    token = _mint_resource_token(config, verified, scope=scope, dataflow=dataflow)
                     return (
                         AAuthError(INVALID_TOKEN, 401, "auth token required").body(),
                         401,
