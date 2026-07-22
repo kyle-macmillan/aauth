@@ -69,6 +69,25 @@ def create_as(
 
     @app.post(token_path, endpoint="aauth_as_token")
     def token_endpoint():
+        """
+        Endpoint that the Sentinel/PS calls to get an auth token
+        for the agent to use for the resource.
+
+        Function Logic:
+        1. Verify the incoming request is signed by Sentinel/PS.
+        2. Verify both resource and agent tokens are present.
+        3. Verify resource and agent tokens are valid.
+        4. Check policy
+        5. Choose to deny, defer, or issue a token
+
+        Request (HTTP-signed by the PS, jwks_uri):
+        - resource_token: str
+        - agent_token: str
+
+        Response:
+        - auth_token: str
+        - expires_in: int
+        """
         # §9.1.1: signed POST from a PS (jwks_uri scheme), carrying the
         # resource token and the agent's agent token.
         incoming = HttpRequest(request.method, request.url, dict(request.headers.items()))
