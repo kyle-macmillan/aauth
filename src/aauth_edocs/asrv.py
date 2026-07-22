@@ -80,7 +80,7 @@ def create_as(
         4. Check policy
         5. Choose to deny, defer, or issue a token
 
-        Request (HTTP-signed by the PS, jwks_uri):
+        Request (HTTP-signed by the Sentinel/PS, jwks_uri):
         - resource_token: str
         - agent_token: str
 
