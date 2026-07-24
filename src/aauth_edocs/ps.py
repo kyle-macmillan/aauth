@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Callable
+from typing import Callable, Literal, TypedDict
 
 from flask import Flask, request, session
 
@@ -33,13 +33,37 @@ Policy = Callable[[dict, dict], str]
 PermissionPolicy = Callable[[dict, dict], str]
 
 
+class GrantContext(TypedDict, total=False):
+    """State threaded through a /token request from verification to issuance."""
+
+    resource_token: str
+    rt_claims: dict
+    agent_claims: dict
+    subagent_claims: dict | None
+    agent_token: str
+    requested_scope: str | None
+    requested_dataflow: dict | None
+    clarification_rounds: int
+    clarification_response: str
+    upstream_claims: dict | None
+    act_agent: str | None
+    as_pending_url: str
+
+
+class PermissionContext(TypedDict):
+    """State for a pending /permission request."""
+
+    kind: Literal["permission"]
+    agent_claims: dict
+    request: dict
+
+
+PendingContext = GrantContext | PermissionContext
+
+
 def directed_sub(person: str, resource: str) -> str:
     """Pairwise pseudonymous user id per resource (§15.1)."""
     return "u_" + hashlib.sha256(f"{person}|{resource}".encode()).hexdigest()[:16]
-
-
-def _canonical_dataflow(dataflow: dict) -> str:
-    return json.dumps(dataflow, sort_keys=True, separators=(",", ":"))
 
 
 def create_ps(
@@ -58,8 +82,8 @@ def create_ps(
     transport = transport or RequestsTransport()
     resolver = JwksResolver(transport)
     store = PendingStore(base_path=f"{issuer}/pending")
-    pending_requests: dict[str, dict] = {}  # pid -> context for the consent decision
-    interaction_requests: dict[str, dict] = {}
+    pending_requests: dict[str, PendingContext] = {}  # pid -> context for the consent decision
+    interaction_requests: dict[str, GrantContext] = {}
     agent_bindings = agent_bindings if agent_bindings is not None else {}
     consents = consents if consents is not None else set()
     app.extensions["aauth_ps"] = {
@@ -128,45 +152,16 @@ def create_ps(
         if not resource_token:
             raise AAuthError(INVALID_REQUEST, 400, "resource_token is required")
 
-        agent_claims = verified.claims
-        presented_token = verified.token
-        subagent_claims = None
-        upstream_claims = None
-        act_agent = None
-        if agent_claims.get("parent_agent"):
-            parent_token = body.get("subagent_token")
-            if not parent_token:
-                raise AAuthError(INVALID_TOKEN, 401, "sub-agent requests require parent subagent_token")
-            parent_claims = verify_agent_token(parent_token, resolver)
-            if parent_claims.get("sub") != agent_claims["parent_agent"]:
-                raise AAuthError(INVALID_TOKEN, 401, "subagent_token is not the parent agent")
-            subagent_claims = agent_claims
-            agent_claims = parent_claims
-            presented_token = parent_token
-            act_agent = parent_claims["sub"]
-
-        # §6.7.2 binding checks; aud routing happens below, so verify against
-        # the token's own aud here.
-        _, peeked = peek_jwt(resource_token)
-        upstream_token = body.get("upstream_token")
-        if upstream_token:
-            upstream_aud = body.get("upstream_aud") or peek_jwt(upstream_token)[1].get("aud")
-            upstream_claims = verify_auth_token(upstream_token, resolver, aud=upstream_aud)
-            if upstream_claims.get("agent") != agent_claims["sub"]:
-                raise AAuthError(INVALID_TOKEN, 401, "upstream token agent mismatch")
+        agent_claims, subagent_claims, presented_token = _resolve_agent_identity(verified, body)
+        act_agent = agent_claims["sub"] if subagent_claims else None
+        upstream_claims = _resolve_upstream_claims(body, agent_claims)
+        if upstream_claims:
             act_agent = upstream_claims["agent"]
-        rt_claims = verify_resource_token(
-            resource_token,
-            resolver,
-            aud=peeked.get("aud"),
-            agent=agent_claims["sub"],
-            agent_jkt=jwk_thumbprint((subagent_claims or agent_claims)["cnf"]["jwk"]),
-        )
-        if subagent_claims:
-            if rt_claims.get("agent_jkt") != jwk_thumbprint(subagent_claims["cnf"]["jwk"]):
-                raise AAuthError(INVALID_TOKEN, 401, "resource token is not bound to the sub-agent key")
 
-        context = {
+        rt_claims = _verify_incoming_resource_token(resource_token, agent_claims, subagent_claims)
+        _check_dataflow_request(rt_claims, body)
+
+        context: GrantContext = {
             "resource_token": resource_token,
             "rt_claims": rt_claims,
             "agent_claims": agent_claims,
@@ -178,20 +173,68 @@ def create_ps(
             "upstream_claims": upstream_claims,
             "act_agent": act_agent,
         }
-        if rt_claims.get("dataflow") is not None:
-            if body.get("scope") is not None:
-                raise AAuthError(INVALID_REQUEST, 400, "scope is not allowed when resource token has dataflow")
-            requested_df = body.get("dataflow")
-            if requested_df is not None and requested_df != rt_claims["dataflow"]:
-                raise AAuthError(DENIED, 403, "requested dataflow does not match resource token")
         _check_binding(context)
-        if _consent_key(context) in consents:
-            if rt_claims.get("interaction"):
-                return _defer_interaction(context)
-            body = _issue(context)
-            _remember_grant(context)
-            return body
-        decision = policy(agent_claims, rt_claims) if policy else "grant"
+        return _dispatch_grant(context)
+
+    def _resolve_agent_identity(verified, body: dict) -> tuple[dict, dict | None, str]:
+        """Resolve (agent_claims, subagent_claims, presented_token) for direct or delegated sub-agent requests."""
+        agent_claims = verified.claims
+        presented_token = verified.token
+        if not agent_claims.get("parent_agent"):
+            return agent_claims, None, presented_token
+        parent_token = body.get("subagent_token")
+        if not parent_token:
+            raise AAuthError(INVALID_TOKEN, 401, "sub-agent requests require parent subagent_token")
+        parent_claims = verify_agent_token(parent_token, resolver)
+        if parent_claims.get("sub") != agent_claims["parent_agent"]:
+            raise AAuthError(INVALID_TOKEN, 401, "subagent_token is not the parent agent")
+        return parent_claims, agent_claims, parent_token
+
+    def _resolve_upstream_claims(body: dict, agent_claims: dict) -> dict | None:
+        """Verify the optional upstream auth token relayed for a federated request (§6.7.2)."""
+        upstream_token = body.get("upstream_token")
+        if not upstream_token:
+            return None
+        upstream_aud = body.get("upstream_aud") or peek_jwt(upstream_token)[1].get("aud")
+        upstream_claims = verify_auth_token(upstream_token, resolver, aud=upstream_aud)
+        if upstream_claims.get("agent") != agent_claims["sub"]:
+            raise AAuthError(INVALID_TOKEN, 401, "upstream token agent mismatch")
+        return upstream_claims
+
+    def _verify_incoming_resource_token(resource_token: str, agent_claims: dict, subagent_claims: dict | None) -> dict:
+        """Verify the resource token and, for sub-agent requests, its binding to the sub-agent key."""
+        _, peeked = peek_jwt(resource_token)
+        rt_claims = verify_resource_token(
+            resource_token,
+            resolver,
+            aud=peeked.get("aud"),
+            agent=agent_claims["sub"],
+            agent_jkt=jwk_thumbprint((subagent_claims or agent_claims)["cnf"]["jwk"]),
+        )
+        if subagent_claims and rt_claims.get("agent_jkt") != jwk_thumbprint(subagent_claims["cnf"]["jwk"]):
+            raise AAuthError(INVALID_TOKEN, 401, "resource token is not bound to the sub-agent key")
+        return rt_claims
+
+    def _check_dataflow_request(rt_claims: dict, body: dict) -> None:
+        """A dataflow-scoped resource token doesn't accept a separate scope request."""
+        if rt_claims.get("dataflow") is None:
+            return
+        if body.get("scope") is not None:
+            raise AAuthError(INVALID_REQUEST, 400, "scope is not allowed when resource token has dataflow")
+        requested_df = body.get("dataflow")
+        if requested_df is not None and requested_df != rt_claims["dataflow"]:
+            raise AAuthError(DENIED, 403, "requested dataflow does not match resource token")
+
+    def _check_binding(context: GrantContext) -> None:
+        bound_person = agent_bindings.get(context["agent_claims"]["sub"])
+        if bound_person is not None and bound_person != person:
+            raise AAuthError(DENIED, 403, "agent is already bound to another person")
+
+    def _dispatch_grant(context: GrantContext):
+        """Apply the consent policy to a verified token request: issue, defer, or deny."""
+        rt_claims = context["rt_claims"]
+        already_consented = _consent_key(context) in consents
+        decision = "grant" if already_consented else (policy(context["agent_claims"], rt_claims) if policy else "grant")
         if decision == "deny":
             raise AAuthError(DENIED, 403, "consent denied by policy")
         if decision == "clarification":
@@ -199,9 +242,7 @@ def create_ps(
         if decision == "grant":
             if rt_claims.get("interaction"):
                 return _defer_interaction(context)
-            body = _issue(context)
-            _remember_grant(context)
-            return body
+            return _issue_and_remember(context)
         # pending: user consent needed (§12.3.4 approval — no user URL to visit,
         # the decision arrives via the /consent endpoint)
         pid = store.create(requirement=build_requirement(APPROVAL), retry_after=0)
@@ -209,146 +250,7 @@ def create_ps(
         status, headers, response_body = store.response(pid)
         return response_body, status, headers
 
-    @app.post("/permission")
-    def permission_endpoint():
-        verified = verify(_incoming(), resolver)
-        if verified.header.get("typ") != AGENT_TYP:
-            raise AAuthError(INVALID_TOKEN, 401, "permission endpoint expects an agent token")
-        body = request.get_json(force=True) or {}
-        if not body.get("action"):
-            raise AAuthError(INVALID_REQUEST, 400, "action is required")
-
-        decision = permission_policy(verified.claims, body) if permission_policy else "grant"
-        if decision == "deny":
-            raise AAuthError(DENIED, 403, "permission denied by policy")
-        if decision == "grant":
-            return {"permission": "granted"}
-        if decision == "pending":
-            pid = store.create(requirement=build_requirement(APPROVAL), retry_after=0)
-            pending_requests[pid] = {
-                "kind": "permission",
-                "agent_claims": verified.claims,
-                "request": body,
-            }
-            status, headers, response_body = store.response(pid)
-            return response_body, status, headers
-        raise AAuthError(INVALID_REQUEST, 400, f"unsupported permission decision {decision!r}")
-
-    @app.get("/pending/<pid>")
-    def pending(pid: str):
-        status, headers, body = store.response(pid)
-        return body, status, headers
-
-    @app.post("/pending/<pid>")
-    def clarify(pid: str):
-        context = pending_requests.get(pid)
-        if context is None:
-            raise AAuthError(INVALID_REQUEST, 404, "no such pending clarification")
-        body = request.get_json(force=True) or {}
-        action = body.get("action")
-        if action == "clarification_response":
-            context["clarification_response"] = body.get("response", "")
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
-            pending_requests.pop(pid, None)
-            return {"status": "recorded"}
-        if action == "updated_request":
-            resource_token = body.get("resource_token")
-            if not resource_token:
-                raise AAuthError(INVALID_REQUEST, 400, "resource_token is required")
-            context["rt_claims"] = _verify_updated_resource_token(resource_token, context)
-            context["resource_token"] = resource_token
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
-            pending_requests.pop(pid, None)
-            return {"status": "recorded"}
-        raise AAuthError(INVALID_REQUEST, 400, "unsupported clarification action")
-
-    @app.delete("/pending/<pid>")
-    def cancel_clarification(pid: str):
-        if pending_requests.pop(pid, None) is None:
-            raise AAuthError(INVALID_REQUEST, 404, "no such pending clarification")
-        store.deny(pid, error=DENIED, detail="clarification cancelled")
-        return {"status": "cancelled"}
-
-    @app.post("/consent/<pid>")
-    def consent(pid: str):
-        """Dev stand-in for the user's consent UI."""
-        if session.get("person") != person:
-            raise AAuthError(INVALID_REQUEST, 401, "login required")
-        context = pending_requests.pop(pid, None)
-        if context is None:
-            raise AAuthError(INVALID_REQUEST, 404, "no such pending consent")
-        decision = (request.get_json(force=True) or {}).get("decision")
-        if decision == "grant":
-            if context.get("kind") == "permission":
-                store.resolve(pid, {"permission": "granted"})
-                return {"status": "recorded"}
-            if context.get("as_pending_url"):
-                _complete_as_pending(pid, context)
-                return {"status": "recorded"}
-            _check_binding(context)
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
-        else:
-            store.deny(pid, detail="the user declined the request")
-        return {"status": "recorded"}
-
-    @app.post("/interaction/<pid>")
-    def interaction(pid: str):
-        if session.get("person") != person:
-            raise AAuthError(INVALID_REQUEST, 401, "login required")
-        context = interaction_requests.pop(pid, None)
-        if context is None:
-            raise AAuthError(INVALID_REQUEST, 404, "no such pending interaction")
-        decision = (request.get_json(force=True) or {}).get("decision")
-        if decision == "grant":
-            if context.get("as_pending_url"):
-                _complete_as_pending(pid, context)
-                return {"status": "recorded"}
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
-        else:
-            store.deny(pid, detail="resource interaction denied")
-        return {"status": "recorded"}
-
-    def _check_binding(context: dict) -> None:
-        bound_person = agent_bindings.get(context["agent_claims"]["sub"])
-        if bound_person is not None and bound_person != person:
-            raise AAuthError(DENIED, 403, "agent is already bound to another person")
-
-    def _remember_grant(context: dict) -> None:
-        agent_bindings[context["agent_claims"]["sub"]] = person
-        consents.add(_consent_key(context))
-
-    def _consent_key(context: dict) -> tuple[str, str, str, str]:
-        rt_claims = context["rt_claims"]
-        agent_claims = context.get("subagent_claims") or context["agent_claims"]
-        if rt_claims.get("dataflow") is not None:
-            grant = _canonical_dataflow(rt_claims["dataflow"])
-        else:
-            grant = rt_claims.get("scope") or ""
-        return person, agent_claims["sub"], rt_claims["iss"], grant
-
-    def _granted_scope(context: dict) -> str | None:
-        rt_scope = context["rt_claims"].get("scope")
-        requested = context.get("requested_scope")
-        if requested is None:
-            return rt_scope
-        allowed = set((rt_scope or "").split())
-        requested_set = set(requested.split())
-        if not requested_set <= allowed:
-            raise AAuthError(DENIED, 403, "requested scope exceeds resource token scope")
-        return requested
-
-    def _granted_dataflow(context: dict) -> dict:
-        return context["rt_claims"]["dataflow"]
-
-    def _defer_clarification(context: dict):
+    def _defer_clarification(context: GrantContext):
         if context["clarification_rounds"] >= 5:
             raise AAuthError(DENIED, 403, "clarification round limit reached")
         context["clarification_rounds"] += 1
@@ -358,7 +260,7 @@ def create_ps(
         body.update({"question": "Please clarify this access request.", "round": context["clarification_rounds"]})
         return body, status, headers
 
-    def _defer_interaction(context: dict):
+    def _defer_interaction(context: GrantContext):
         pid = store.create(retry_after=0)
         store.set_requirement(pid, build_requirement(INTERACTION, url=f"{issuer}/interaction/{pid}"))
         interaction_requests[pid] = context
@@ -366,21 +268,28 @@ def create_ps(
         body["interaction"] = context["rt_claims"].get("interaction")
         return body, status, headers
 
-    def _verify_updated_resource_token(resource_token: str, context: dict) -> dict:
-        _, peeked = peek_jwt(resource_token)
-        claims = verify_resource_token(
-            resource_token,
-            resolver,
-            aud=peeked.get("aud"),
-            agent=context["agent_claims"]["sub"],
-            agent_jkt=jwk_thumbprint(context["agent_claims"]["cnf"]["jwk"]),
-        )
-        original = context["rt_claims"]
-        if claims.get("iss") != original.get("iss") or claims.get("aud") != original.get("aud"):
-            raise AAuthError(INVALID_TOKEN, 400, "updated resource token changed issuer or audience")
-        return claims
+    def _issue_and_remember(context: GrantContext) -> dict:
+        result = _issue(context)
+        _remember_grant(context)
+        return result
 
-    def _issue(context: dict) -> dict:
+    def _remember_grant(context: GrantContext) -> None:
+        agent_bindings[context["agent_claims"]["sub"]] = person
+        consents.add(_consent_key(context))
+
+    def _consent_key(context: GrantContext) -> tuple[str, str, str, str]:
+        rt_claims = context["rt_claims"]
+        agent_claims = context.get("subagent_claims") or context["agent_claims"]
+        if rt_claims.get("dataflow") is not None:
+            grant = _canonical_dataflow(rt_claims["dataflow"])
+        else:
+            grant = rt_claims.get("scope") or ""
+        return person, agent_claims["sub"], rt_claims["iss"], grant
+
+    def _canonical_dataflow(dataflow: dict) -> str:
+        return json.dumps(dataflow, sort_keys=True, separators=(",", ":"))
+
+    def _issue(context: GrantContext) -> dict:
         """Issue (three-party) or federate for (four-party) an auth token."""
         rt_claims = context["rt_claims"]
         agent_claims = context.get("subagent_claims") or context["agent_claims"]
@@ -435,7 +344,31 @@ def create_ps(
         _check_as_token(context, as_url, resource, agent_claims, auth_token)
         return {"auth_token": auth_token, "expires_in": response.json().get("expires_in", 3600)}
 
-    def _handle_as_pending(context: dict, response):
+    def _granted_scope(context: GrantContext) -> str | None:
+        rt_scope = context["rt_claims"].get("scope")
+        requested = context.get("requested_scope")
+        if requested is None:
+            return rt_scope
+        allowed = set((rt_scope or "").split())
+        requested_set = set(requested.split())
+        if not requested_set <= allowed:
+            raise AAuthError(DENIED, 403, "requested scope exceeds resource token scope")
+        return requested
+
+    def _granted_dataflow(context: GrantContext) -> dict:
+        return context["rt_claims"]["dataflow"]
+
+    def _fetch_grant_metadata(issuer: str, transport):
+        """Discover token endpoint at aud: classic AS or eDocs sentinel."""
+        last_error = None
+        for dwk in (DWK_ACCESS, DWK_SENTINEL):
+            try:
+                return fetch_metadata(issuer, dwk, transport)
+            except AAuthError as error:
+                last_error = error
+        raise last_error or AAuthError(SERVER_ERROR, 502, f"no grant metadata at {issuer}")
+
+    def _handle_as_pending(context: GrantContext, response):
         requirement, params = parse_requirement(response.headers["AAuth-Requirement"])
         as_pending_url = response.headers["Location"]
         if requirement == CLAIMS:
@@ -468,7 +401,140 @@ def create_ps(
 
         raise AAuthError(INVALID_REQUEST, 400, f"unsupported AS requirement {requirement!r}")
 
-    def _complete_as_pending(pid: str, context: dict) -> None:
+    def _check_as_token(context: GrantContext, as_url: str, resource: str, agent_claims: dict, auth_token: str) -> None:
+        # §9.1.3-lite: sanity-check what the AS issued before relaying
+        _, claims = peek_jwt(auth_token)
+        rt_claims = context["rt_claims"]
+        if (
+            claims.get("iss") != as_url
+            or claims.get("aud") != resource
+            or claims.get("agent") != agent_claims["sub"]
+            or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
+        ):
+            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        if rt_claims.get("dataflow") is not None:
+            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
+                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
+            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
+
+    @app.post("/permission")
+    def permission_endpoint():
+        verified = verify(_incoming(), resolver)
+        if verified.header.get("typ") != AGENT_TYP:
+            raise AAuthError(INVALID_TOKEN, 401, "permission endpoint expects an agent token")
+        body = request.get_json(force=True) or {}
+        if not body.get("action"):
+            raise AAuthError(INVALID_REQUEST, 400, "action is required")
+
+        decision = permission_policy(verified.claims, body) if permission_policy else "grant"
+        if decision == "deny":
+            raise AAuthError(DENIED, 403, "permission denied by policy")
+        if decision == "grant":
+            return {"permission": "granted"}
+        if decision == "pending":
+            pid = store.create(requirement=build_requirement(APPROVAL), retry_after=0)
+            pending_requests[pid] = {
+                "kind": "permission",
+                "agent_claims": verified.claims,
+                "request": body,
+            }
+            status, headers, response_body = store.response(pid)
+            return response_body, status, headers
+        raise AAuthError(INVALID_REQUEST, 400, f"unsupported permission decision {decision!r}")
+
+    @app.get("/pending/<pid>")
+    def pending(pid: str):
+        status, headers, body = store.response(pid)
+        return body, status, headers
+
+    @app.post("/pending/<pid>")
+    def clarify(pid: str):
+        context = pending_requests.get(pid)
+        if context is None:
+            raise AAuthError(INVALID_REQUEST, 404, "no such pending clarification")
+        body = request.get_json(force=True) or {}
+        action = body.get("action")
+        if action == "clarification_response":
+            context["clarification_response"] = body.get("response", "")
+            return _resolve_grant(pid, context)
+        if action == "updated_request":
+            resource_token = body.get("resource_token")
+            if not resource_token:
+                raise AAuthError(INVALID_REQUEST, 400, "resource_token is required")
+            context["rt_claims"] = _verify_updated_resource_token(resource_token, context)
+            context["resource_token"] = resource_token
+            return _resolve_grant(pid, context)
+        raise AAuthError(INVALID_REQUEST, 400, "unsupported clarification action")
+
+    def _verify_updated_resource_token(resource_token: str, context: GrantContext) -> dict:
+        _, peeked = peek_jwt(resource_token)
+        claims = verify_resource_token(
+            resource_token,
+            resolver,
+            aud=peeked.get("aud"),
+            agent=context["agent_claims"]["sub"],
+            agent_jkt=jwk_thumbprint(context["agent_claims"]["cnf"]["jwk"]),
+        )
+        original = context["rt_claims"]
+        if claims.get("iss") != original.get("iss") or claims.get("aud") != original.get("aud"):
+            raise AAuthError(INVALID_TOKEN, 400, "updated resource token changed issuer or audience")
+        return claims
+
+    def _resolve_grant(pid: str, context: GrantContext) -> dict:
+        """Issue the grant for a resolved pending request and record it with the store."""
+        result = _issue_and_remember(context)
+        store.resolve(pid, result)
+        pending_requests.pop(pid, None)
+        return {"status": "recorded"}
+
+    @app.delete("/pending/<pid>")
+    def cancel_clarification(pid: str):
+        if pending_requests.pop(pid, None) is None:
+            raise AAuthError(INVALID_REQUEST, 404, "no such pending clarification")
+        store.deny(pid, error=DENIED, detail="clarification cancelled")
+        return {"status": "cancelled"}
+
+    @app.post("/consent/<pid>")
+    def consent(pid: str):
+        """Dev stand-in for the user's consent UI."""
+        if session.get("person") != person:
+            raise AAuthError(INVALID_REQUEST, 401, "login required")
+        context = pending_requests.pop(pid, None)
+        if context is None:
+            raise AAuthError(INVALID_REQUEST, 404, "no such pending consent")
+        decision = (request.get_json(force=True) or {}).get("decision")
+        if decision == "grant":
+            if context.get("kind") == "permission":
+                store.resolve(pid, {"permission": "granted"})
+                return {"status": "recorded"}
+            if context.get("as_pending_url"):
+                _complete_as_pending(pid, context)
+                return {"status": "recorded"}
+            _check_binding(context)
+            store.resolve(pid, _issue_and_remember(context))
+        else:
+            store.deny(pid, detail="the user declined the request")
+        return {"status": "recorded"}
+
+    @app.post("/interaction/<pid>")
+    def interaction(pid: str):
+        if session.get("person") != person:
+            raise AAuthError(INVALID_REQUEST, 401, "login required")
+        context = interaction_requests.pop(pid, None)
+        if context is None:
+            raise AAuthError(INVALID_REQUEST, 404, "no such pending interaction")
+        decision = (request.get_json(force=True) or {}).get("decision")
+        if decision == "grant":
+            if context.get("as_pending_url"):
+                _complete_as_pending(pid, context)
+                return {"status": "recorded"}
+            store.resolve(pid, _issue_and_remember(context))
+        else:
+            store.deny(pid, detail="resource interaction denied")
+        return {"status": "recorded"}
+
+    def _complete_as_pending(pid: str, context: GrantContext) -> None:
         response = transport.request("POST", context["as_pending_url"], json={"decision": "grant"})
         if response.status_code != 200:
             raise AAuthError.from_response(response.status_code, response.json())
@@ -486,35 +552,7 @@ def create_ps(
         _remember_grant(context)
         store.resolve(pid, {"auth_token": auth_token, "expires_in": final.json().get("expires_in", 3600)})
 
-    def _check_as_token(context: dict, as_url: str, resource: str, agent_claims: dict, auth_token: str) -> None:
-        # §9.1.3-lite: sanity-check what the AS issued before relaying
-        _, claims = peek_jwt(auth_token)
-        rt_claims = context["rt_claims"]
-        if (
-            claims.get("iss") != as_url
-            or claims.get("aud") != resource
-            or claims.get("agent") != agent_claims["sub"]
-            or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
-        ):
-            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        if rt_claims.get("dataflow") is not None:
-            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
-                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
-            raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-
     return app
-
-
-def _fetch_grant_metadata(issuer: str, transport):
-    """Discover token endpoint at aud: classic AS or eDocs sentinel."""
-    last_error = None
-    for dwk in (DWK_ACCESS, DWK_SENTINEL):
-        try:
-            return fetch_metadata(issuer, dwk, transport)
-        except AAuthError as error:
-            last_error = error
-    raise last_error or AAuthError(SERVER_ERROR, 502, f"no grant metadata at {issuer}")
 
 
 def _incoming() -> HttpRequest:
