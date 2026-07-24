@@ -79,6 +79,11 @@ def install_resource(app: Flask, config: ResourceConfig) -> None:
         except AAuthError as error:
             return error.body(), error.status
 
+    @app.post("/access")
+    def access_endpoint():
+        """
+        """
+        
 
 def _mint_resource_token(
     config: ResourceConfig,
