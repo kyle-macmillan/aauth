@@ -4,19 +4,18 @@ import pytest
 
 from aauth_edocs import (
     AAuthError,
-    AgentSession,
     HttpRequest,
     JwksResolver,
-    ResourceConfig,
     SigningKey,
-    create_ap,
-    create_ps,
-    install_resource,
     issue_auth_token,
     issue_resource_token,
     peek_jwt,
     sign,
 )
+from aauth_edocs.agent import AgentSession
+from aauth_edocs.ap import create_ap
+from aauth_edocs.ps import create_ps
+from aauth_edocs.resource import ResourceConfig, install_resource
 from conftest import LoopbackTransport
 
 AP_URL = "http://ap.local"

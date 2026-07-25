@@ -4,13 +4,13 @@ import pytest
 
 from aauth_edocs import (
     AAuthError,
-    AgentSession,
     HttpRequest,
-    create_ap,
-    create_ps,
     parse_requirement,
     sign,
 )
+from aauth_edocs.agent import AgentSession
+from aauth_edocs.ap import create_ap
+from aauth_edocs.ps import create_ps
 from conftest import LoopbackTransport
 
 AP_URL = "http://ap.local"

@@ -19,13 +19,11 @@ import requests
 from flask import Flask, g
 
 from aauth_edocs import (
-    AgentSession,
     JwksResolver,
-    RequestsTransport,
-    create_ap,
-    install_metadata,
-    require_aauth_identity,
 )
+from aauth_edocs.agent import AgentSession, RequestsTransport
+from aauth_edocs.ap import create_ap
+from aauth_edocs.resource import install_metadata, require_aauth_identity
 
 AP_URL = "http://127.0.0.1:5001"
 RESOURCE_URL = "http://127.0.0.1:5002"

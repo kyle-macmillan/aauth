@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 
 [[package]]
@@ -25,14 +25,22 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
-    { name = "flask" },
     { name = "http-sfv" },
     { name = "joserfc" },
+]
+
+[package.optional-dependencies]
+client = [
+    { name = "requests" },
+]
+flask = [
+    { name = "flask" },
     { name = "requests" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "aauth-edocs", extra = ["client", "flask"] },
     { name = "pytest" },
 ]
 interop = [
@@ -42,14 +50,19 @@ interop = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=42.0" },
-    { name = "flask", specifier = ">=3.0" },
+    { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0" },
     { name = "http-sfv", specifier = ">=0.9.9" },
     { name = "joserfc", specifier = ">=0.9.0" },
-    { name = "requests", specifier = ">=2.31" },
+    { name = "requests", marker = "extra == 'client'", specifier = ">=2.31" },
+    { name = "requests", marker = "extra == 'flask'", specifier = ">=2.31" },
 ]
+provides-extras = ["client", "flask"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.0" }]
+dev = [
+    { name = "aauth-edocs", extras = ["client", "flask"] },
+    { name = "pytest", specifier = ">=8.0" },
+]
 interop = [{ name = "aauth", specifier = ">=0.3.5" }]
 
 [[package]]

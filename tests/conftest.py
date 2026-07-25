@@ -3,7 +3,8 @@ from urllib.parse import urlsplit
 import pytest
 from flask import Flask
 
-from aauth_edocs import SigningKey, TransportResponse, agent_id, issue_agent_token, static_resolver
+from aauth_edocs import SigningKey, agent_id, issue_agent_token, static_resolver
+from aauth_edocs.agent import TransportResponse
 
 AP = "https://ap.example"
 RESOURCE = "https://resource.example"

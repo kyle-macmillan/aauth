@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from typing import Callable
 from urllib.parse import urlsplit
@@ -29,6 +30,66 @@ MANDATED_COMPONENTS = ("@method", "@authority", "@path", "signature-key")
 
 # KeyResolver: (iss, dwk, kid) -> public JWK dict for verifying a JWT.
 KeyResolver = Callable[[str, str, str], dict]
+HeaderInput = Mapping[str, str] | Iterable[tuple[str, str]]
+
+
+class HttpHeaders(MutableMapping[str, str]):
+    """Case-insensitive HTTP fields that preserve repeated lines and wire order."""
+
+    def __init__(self, values: HeaderInput | None = None) -> None:
+        if values is None:
+            self._fields: list[tuple[str, str]] = []
+        elif isinstance(values, Mapping):
+            self._fields = list(values.items())
+        else:
+            self._fields = list(values)
+
+    def get_all(self, name: str) -> list[str]:
+        """Return every value for `name` in wire order."""
+        lowercase_name = name.lower()
+        return [value for field_name, value in self._fields if field_name.lower() == lowercase_name]
+
+    def get_combined(self, name: str) -> str | None:
+        """Return repeated field values combined in wire order."""
+        values = self.get_all(name)
+        return ", ".join(values) if values else None
+
+    def set(self, name: str, value: str) -> None:
+        """Replace every existing line for `name` with one field line."""
+        lowercase_name = name.lower()
+        self._fields = [field for field in self._fields if field[0].lower() != lowercase_name]
+        self._fields.append((name, value))
+
+    def raw_items(self) -> list[tuple[str, str]]:
+        """Return a copy of the ordered field lines without combining them."""
+        return list(self._fields)
+
+    def __getitem__(self, name: str) -> str:
+        value = self.get_combined(name)
+        if value is None:
+            raise KeyError(name)
+        return value
+
+    def __setitem__(self, name: str, value: str) -> None:
+        self.set(name, value)
+
+    def __delitem__(self, name: str) -> None:
+        lowercase_name = name.lower()
+        remaining = [field for field in self._fields if field[0].lower() != lowercase_name]
+        if len(remaining) == len(self._fields):
+            raise KeyError(name)
+        self._fields = remaining
+
+    def __iter__(self) -> Iterator[str]:
+        seen: set[str] = set()
+        for name, _ in self._fields:
+            lowercase_name = name.lower()
+            if lowercase_name not in seen:
+                seen.add(lowercase_name)
+                yield name
+
+    def __len__(self) -> int:
+        return len({name.lower() for name, _ in self._fields})
 
 
 @dataclass
@@ -37,14 +98,23 @@ class HttpRequest:
 
     method: str
     url: str
-    headers: dict[str, str] = field(default_factory=dict)
+    headers: HttpHeaders = field(default_factory=HttpHeaders)
     body: bytes | None = None
 
+    def __init__(
+        self,
+        method: str,
+        url: str,
+        headers: HttpHeaders | HeaderInput | None = None,
+        body: bytes | None = None,
+    ) -> None:
+        self.method = method
+        self.url = url
+        self.headers = headers if isinstance(headers, HttpHeaders) else HttpHeaders(headers)
+        self.body = body
+
     def get_header(self, name: str) -> str | None:
-        for k, v in self.headers.items():
-            if k.lower() == name.lower():
-                return v
-        return None
+        return self.headers.get_combined(name)
 
 
 @dataclass
@@ -85,7 +155,7 @@ def sign(request: HttpRequest, key: SigningKey, token: str, *, now: Callable[[],
     Mutates and returns `request`, adding Signature-Key, Signature-Input,
     and Signature headers.
     """
-    request.headers["Signature-Key"] = f'sig=jwt;jwt="{token}"'
+    request.headers.set("Signature-Key", f'sig=jwt;jwt="{token}"')
     return _sign_prepared(request, key, now)
 
 
@@ -94,7 +164,7 @@ def sign_server(
 ) -> HttpRequest:
     """Sign a server-to-server request using the jwks_uri Signature-Key
     scheme (SigKey §3.5) — how a PS authenticates to an AS (§9.1.1)."""
-    request.headers["Signature-Key"] = f'sig=jwks_uri;id="{issuer}";dwk="{dwk}";kid="{key.kid}"'
+    request.headers.set("Signature-Key", f'sig=jwks_uri;id="{issuer}";dwk="{dwk}";kid="{key.kid}"')
     return _sign_prepared(request, key, now)
 
 
@@ -111,8 +181,8 @@ def _sign_prepared(request: HttpRequest, key: SigningKey, now: Callable[[], floa
     params = f"({quoted});created={int(now())}"
     signature = key.sign(_signature_base(request, components, params))
 
-    request.headers["Signature-Input"] = f"sig={params}"
-    request.headers["Signature"] = f"sig=:{base64.b64encode(signature).decode()}:"
+    request.headers.set("Signature-Input", f"sig={params}")
+    request.headers.set("Signature", f"sig=:{base64.b64encode(signature).decode()}:")
     return request
 
 

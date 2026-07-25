@@ -1,11 +1,47 @@
 import pytest
 
-from aauth_edocs import AAuthError, HttpRequest, sign, verify
+from aauth_edocs import AAuthError, HttpHeaders, HttpRequest, sign, verify
 from conftest import AP
 
 
 def make_request(url="https://resource.example/api/docs", method="GET", headers=None):
     return HttpRequest(method=method, url=url, headers=headers or {})
+
+
+def test_http_headers_preserve_repeated_fields_in_wire_order():
+    headers = HttpHeaders([("X-Example", "first"), ("x-example", "second")])
+
+    assert headers.raw_items() == [("X-Example", "first"), ("x-example", "second")]
+
+
+def test_http_headers_lookup_is_case_insensitive():
+    headers = HttpHeaders({"Content-Type": "application/json"})
+
+    assert headers["content-type"] == "application/json"
+    assert "CONTENT-TYPE" in headers
+
+
+def test_http_headers_combine_repeated_values_in_wire_order():
+    headers = HttpHeaders([("X-Example", "first"), ("x-example", "second")])
+
+    assert headers.get_all("X-EXAMPLE") == ["first", "second"]
+    assert headers.get_combined("x-example") == "first, second"
+    assert headers["X-Example"] == "first, second"
+
+
+def test_setting_a_header_replaces_every_existing_field_line():
+    headers = HttpHeaders([("Signature", "old-one"), ("signature", "old-two"), ("X-Other", "kept")])
+
+    headers.set("Signature", "new")
+
+    assert headers.raw_items() == [("X-Other", "kept"), ("Signature", "new")]
+
+
+def test_http_request_accepts_existing_header_mappings():
+    request = HttpRequest("GET", "https://resource.example", {"Authorization": "AAuth token"})
+
+    assert isinstance(request.headers, HttpHeaders)
+    assert request.get_header("authorization") == "AAuth token"
 
 
 def test_sign_verify_roundtrip(agent_key, agent_token, resolver, agent):
@@ -15,6 +51,20 @@ def test_sign_verify_roundtrip(agent_key, agent_token, resolver, agent):
     assert result.claims["sub"] == agent
     assert result.header["typ"] == "aa-agent+jwt"
     assert set(result.covered) >= {"@method", "@authority", "@path", "signature-key"}
+
+
+def test_resigning_replaces_previous_signature_headers(agent_key, agent_token):
+    request = make_request()
+
+    sign(request, agent_key, agent_token, now=lambda: 1000.0)
+    sign(request, agent_key, agent_token, now=lambda: 1001.0)
+
+    generated_names = {"signature-key", "signature-input", "signature"}
+    counts = {
+        name: sum(field_name.lower() == name for field_name, _ in request.headers.raw_items())
+        for name in generated_names
+    }
+    assert counts == {"signature-key": 1, "signature-input": 1, "signature": 1}
 
 
 @pytest.mark.parametrize("tamper", ["method", "path", "authority"])

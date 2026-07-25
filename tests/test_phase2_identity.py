@@ -5,16 +5,15 @@ import pytest
 from flask import Flask, g
 
 from aauth_edocs import (
-    AgentSession,
     HttpRequest,
     JwksResolver,
-    create_ap,
-    install_metadata,
     issue_agent_token,
     parse_requirement,
-    require_aauth_identity,
     sign,
 )
+from aauth_edocs.agent import AgentSession
+from aauth_edocs.ap import create_ap
+from aauth_edocs.resource import install_metadata, require_aauth_identity
 from conftest import LoopbackTransport
 
 AP_URL = "http://ap.local"
