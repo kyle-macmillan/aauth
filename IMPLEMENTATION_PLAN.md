@@ -21,6 +21,9 @@ Traditional AAuth remains on `aauth/main`; all eDocs extension work belongs on
 ### `aauth`
 
 - Extension branch: `edocs-demo`, created from `main` at `b85bc86`.
+- Logical changes 3 and 4 add the core eDocs domain models and extended
+  resource/auth token claims and validators.
+- Latest complete test result: 125 passed, 1 skipped.
 - `main` and `origin/main` were both at `b85bc86`.
 - Older prototypes exist at `origin/edocs` and `origin/chz/sentinel`.
   They are reference material only and must not be merged wholesale. They
@@ -150,8 +153,8 @@ Add explicit models and validators for:
   prerequisite `Dataflow`;
 - `FunctionDescriptor` with immutable ID, description, implementation URI,
   and digest;
-- a PS-signed resource binding containing source agent, source PS, resource
-  issuer, and resource-key thumbprint;
+- a PS-signed resource binding containing only source PS, resource issuer,
+  and resource-key thumbprint; the source agent is the registry key;
 - an injected in-memory Sentinel registry containing:
   - resource bindings;
   - `edoc_id -> controller AS URLs`;
@@ -384,8 +387,19 @@ Run:
 
 ## 12. Resume point and review protocol
 
-The first code change after this document should be the core eDocs data model
-and token claim extension on `aauth/edocs-demo`.
+Completed on `aauth/edocs-demo`:
+
+- immutable `Dataflow`, `ExactRule`, `FunctionDescriptor`, and three-field
+  `ResourceBinding` models;
+- injected in-memory `SentinelRegistry`;
+- extended resource and auth token claims for source agent, eDoc ID, and
+  controllers;
+- complete-group, shape, and exact expected-binding validation;
+- 125 passed, 1 skipped.
+
+The next proposed logical change should add the conditional authorization token
+type and its focused issuance/verification tests. It must remain Sentinel-only:
+ordinary auth-token verification must reject it by token type.
 
 Before making it:
 

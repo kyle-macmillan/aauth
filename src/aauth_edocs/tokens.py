@@ -26,6 +26,7 @@ RESOURCE_TYP = "aa-resource+jwt"
 AUTH_TYP = "aa-auth+jwt"
 
 Now = Callable[[], float]
+_EDOC_CLAIMS = ("source_agent", "edoc_id", "controllers")
 
 
 def _issue(typ: str, key: SigningKey, claims: dict, lifetime: int, now: Now) -> str:
@@ -74,6 +75,9 @@ def issue_resource_token(
     key: SigningKey,
     mission: dict | None = None,
     interaction: dict | None = None,
+    source_agent: str | None = None,
+    edoc_id: str | None = None,
+    controllers: list[str] | tuple[str, ...] | None = None,
     lifetime: int = 300,
     now: Now = time.time,
 ) -> str:
@@ -82,6 +86,7 @@ def issue_resource_token(
     `aud` is the PS URL (three-party) or AS URL (four-party). `mission` is a
     mission-reference claim dict when the agent sent AAuth-Mission (§8.7).
     """
+    edocs = _edocs_claims(source_agent, edoc_id, controllers)
     return _issue(
         RESOURCE_TYP,
         key,
@@ -94,6 +99,7 @@ def issue_resource_token(
             "scope": scope,
             "mission": mission,
             "interaction": interaction,
+            **edocs,
         },
         lifetime,
         now,
@@ -111,6 +117,9 @@ def issue_auth_token(
     scope: str | None = None,
     mission: dict | None = None,
     act: dict | None = None,
+    source_agent: str | None = None,
+    edoc_id: str | None = None,
+    controllers: list[str] | tuple[str, ...] | None = None,
     key: SigningKey,
     lifetime: int = 3600,
     now: Now = time.time,
@@ -124,6 +133,7 @@ def issue_auth_token(
         raise ValueError("auth token dwk must be aauth-person.json or aauth-access.json")
     if sub is None and scope is None:
         raise ValueError("auth token needs at least one of sub or scope")
+    edocs = _edocs_claims(source_agent, edoc_id, controllers)
     return _issue(
         AUTH_TYP,
         key,
@@ -137,6 +147,7 @@ def issue_auth_token(
             "scope": scope,
             "mission": mission,
             "act": act,
+            **edocs,
         },
         lifetime,
         now,
@@ -172,17 +183,23 @@ def verify_resource_token(
     aud: str,
     agent: str | None = None,
     agent_jkt: str | None = None,
+    source_agent: str | None = None,
+    scope: str | None = None,
+    edoc_id: str | None = None,
+    controllers: list[str] | tuple[str, ...] | None = None,
     now: Now = time.time,
 ) -> dict:
     """PS/AS-side resource token verification (§6.7.2). `aud` is the
-    recipient's own identifier; agent/agent_jkt are checked when given."""
+    recipient's own identifier; other expected bindings are checked when given."""
     claims = _decode(token, key_resolver, RESOURCE_TYP, now)
+    _validate_edocs_claims(claims)
     if claims.get("aud") != aud:
         raise AAuthError(INVALID_TOKEN, detail=f"resource token aud is {claims.get('aud')}, not us")
     if agent is not None and claims.get("agent") != agent:
         raise AAuthError(INVALID_TOKEN, detail="resource token agent mismatch")
     if agent_jkt is not None and claims.get("agent_jkt") != agent_jkt:
         raise AAuthError(INVALID_TOKEN, detail="resource token agent_jkt mismatch")
+    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
     return claims
 
 
@@ -223,12 +240,17 @@ def verify_auth_token(
     *,
     aud: str,
     signing_jwk: dict | None = None,
+    source_agent: str | None = None,
+    scope: str | None = None,
+    edoc_id: str | None = None,
+    controllers: list[str] | tuple[str, ...] | None = None,
     now: Now = time.time,
 ) -> dict:
     """Resource-side auth token verification (§9.4.3, simplified): typ, an
     issuer dwk of person/access, aud = me, cnf.jwk = the request's signing
     key, and at least one of sub/scope."""
     claims = _decode(token, key_resolver, AUTH_TYP, now)
+    _validate_edocs_claims(claims)
     if claims.get("dwk") not in (DWK_PERSON, DWK_ACCESS):
         raise AAuthError(INVALID_TOKEN, detail=f"auth token dwk {claims.get('dwk')!r} not recognized")
     if claims.get("aud") != aud:
@@ -237,6 +259,7 @@ def verify_auth_token(
         raise AAuthError(INVALID_TOKEN, detail="auth token has neither sub nor scope")
     if signing_jwk is not None:
         _check_cnf(claims, signing_jwk)
+    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
     return claims
 
 
@@ -244,3 +267,61 @@ def _check_cnf(claims: dict, signing_jwk: dict) -> None:
     cnf_jwk = (claims.get("cnf") or {}).get("jwk")
     if not cnf_jwk or jwk_thumbprint(cnf_jwk) != jwk_thumbprint(signing_jwk):
         raise AAuthError(INVALID_TOKEN, detail="token cnf.jwk does not match the signing key")
+
+
+def _edocs_claims(
+    source_agent: str | None,
+    edoc_id: str | None,
+    controllers: list[str] | tuple[str, ...] | None,
+) -> dict:
+    values = (source_agent, edoc_id, controllers)
+    if all(value is None for value in values):
+        return {}
+    if any(value is None for value in values):
+        raise ValueError("eDocs claims require source_agent, edoc_id, and controllers together")
+    if not isinstance(source_agent, str) or not source_agent:
+        raise ValueError("source_agent must be a non-empty string")
+    if not isinstance(edoc_id, str) or not edoc_id:
+        raise ValueError("edoc_id must be a non-empty string")
+    if not isinstance(controllers, (list, tuple)) or not controllers:
+        raise ValueError("controllers must be a non-empty list or tuple")
+    if any(not isinstance(controller, str) or not controller for controller in controllers):
+        raise ValueError("controllers must contain non-empty strings")
+    if len(set(controllers)) != len(controllers):
+        raise ValueError("controllers must not contain duplicates")
+    return {
+        "source_agent": source_agent,
+        "edoc_id": edoc_id,
+        "controllers": list(controllers),
+    }
+
+
+def _validate_edocs_claims(claims: dict) -> None:
+    if not any(name in claims for name in _EDOC_CLAIMS):
+        return
+    if not all(name in claims for name in _EDOC_CLAIMS):
+        raise AAuthError(INVALID_TOKEN, detail="token has an incomplete eDocs claim group")
+    if not isinstance(claims["controllers"], list):
+        raise AAuthError(INVALID_TOKEN, detail="token controllers claim must be a JSON list")
+    try:
+        _edocs_claims(claims["source_agent"], claims["edoc_id"], claims["controllers"])
+    except ValueError as error:
+        raise AAuthError(INVALID_TOKEN, detail=f"invalid eDocs claims: {error}") from error
+
+
+def _check_edocs_bindings(
+    claims: dict,
+    source_agent: str | None,
+    scope: str | None,
+    edoc_id: str | None,
+    controllers: list[str] | tuple[str, ...] | None,
+) -> None:
+    expected = {
+        "source_agent": source_agent,
+        "scope": scope,
+        "edoc_id": edoc_id,
+        "controllers": list(controllers) if controllers is not None else None,
+    }
+    for name, value in expected.items():
+        if value is not None and claims.get(name) != value:
+            raise AAuthError(INVALID_TOKEN, detail=f"token {name} mismatch")

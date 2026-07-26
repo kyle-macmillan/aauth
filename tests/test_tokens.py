@@ -145,3 +145,184 @@ def test_alg_none_rejected(ps_key, agent_key, agent, resolver):
     )
     with pytest.raises(AAuthError):
         verify_auth_token(forged, resolver, aud=RESOURCE)
+
+
+EDOC_SOURCE = "aauth:source@ap.example"
+EDOC_ID = "doc-123"
+EDOC_CONTROLLERS = ("https://as-a.example", "https://as-b.example")
+
+
+def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver):
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        key=resource_key,
+    )
+
+    claims = verify_resource_token(
+        token,
+        resolver,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        source_agent=EDOC_SOURCE,
+        scope="identity@1",
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+    )
+    assert claims["source_agent"] == EDOC_SOURCE
+    assert claims["edoc_id"] == EDOC_ID
+    assert claims["controllers"] == list(EDOC_CONTROLLERS)
+
+
+def test_edocs_auth_token_roundtrip(ps_key, agent_key, agent, resolver):
+    token = issue_auth_token(
+        issuer=PS,
+        dwk="aauth-person.json",
+        aud=RESOURCE,
+        agent=agent,
+        cnf_jwk=agent_key.public_jwk,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        key=ps_key,
+    )
+
+    claims = verify_auth_token(
+        token,
+        resolver,
+        aud=RESOURCE,
+        signing_jwk=agent_key.public_jwk,
+        source_agent=EDOC_SOURCE,
+        scope="identity@1",
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+    )
+    assert claims["source_agent"] == EDOC_SOURCE
+    assert claims["edoc_id"] == EDOC_ID
+    assert claims["controllers"] == list(EDOC_CONTROLLERS)
+
+
+@pytest.mark.parametrize(
+    "edocs",
+    [
+        {"source_agent": EDOC_SOURCE},
+        {"source_agent": EDOC_SOURCE, "edoc_id": EDOC_ID},
+        {"edoc_id": EDOC_ID, "controllers": EDOC_CONTROLLERS},
+    ],
+)
+def test_edocs_claim_group_required_at_issuance(resource_key, agent_key, agent, edocs):
+    with pytest.raises(ValueError, match="together"):
+        issue_resource_token(
+            issuer=RESOURCE,
+            aud=PS,
+            agent=agent,
+            agent_jkt=agent_key.thumbprint,
+            scope="identity@1",
+            key=resource_key,
+            **edocs,
+        )
+
+
+@pytest.mark.parametrize("controllers", [[], (), ["https://as.example", "https://as.example"], [""]])
+def test_edocs_controllers_validated_at_issuance(resource_key, agent_key, agent, controllers):
+    with pytest.raises(ValueError, match="controllers"):
+        issue_resource_token(
+            issuer=RESOURCE,
+            aud=PS,
+            agent=agent,
+            agent_jkt=agent_key.thumbprint,
+            scope="identity@1",
+            source_agent=EDOC_SOURCE,
+            edoc_id=EDOC_ID,
+            controllers=controllers,
+            key=resource_key,
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected", "message"),
+    [
+        ({"source_agent": "aauth:other@ap.example"}, "source_agent"),
+        ({"scope": "other@1"}, "scope"),
+        ({"edoc_id": "doc-456"}, "edoc_id"),
+        ({"controllers": ("https://as-b.example", "https://as-a.example")}, "controllers"),
+    ],
+)
+def test_edocs_resource_token_binding_mismatch(
+    resource_key, agent_key, agent, resolver, expected, message
+):
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        key=resource_key,
+    )
+
+    with pytest.raises(AAuthError, match=message):
+        verify_resource_token(token, resolver, aud=PS, **expected)
+
+
+def test_signed_incomplete_edocs_claim_group_rejected(resource_key, agent_key, agent, resolver):
+    from joserfc import jwt as joserfc_jwt
+    from joserfc.jwk import OKPKey
+
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        key=resource_key,
+    )
+    header, claims = peek_jwt(token)
+    claims["source_agent"] = EDOC_SOURCE
+    malformed = joserfc_jwt.encode(
+        header,
+        claims,
+        OKPKey.import_key(resource_key.private_jwk()),
+        algorithms=["EdDSA"],
+    )
+
+    with pytest.raises(AAuthError, match="incomplete eDocs"):
+        verify_resource_token(malformed, resolver, aud=PS)
+
+
+def test_signed_non_list_controllers_rejected(resource_key, agent_key, agent, resolver):
+    from joserfc import jwt as joserfc_jwt
+    from joserfc.jwk import OKPKey
+
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        key=resource_key,
+    )
+    header, claims = peek_jwt(token)
+    claims["controllers"] = "https://as-a.example"
+    malformed = joserfc_jwt.encode(
+        header,
+        claims,
+        OKPKey.import_key(resource_key.private_jwk()),
+        algorithms=["EdDSA"],
+    )
+
+    with pytest.raises(AAuthError, match="JSON list"):
+        verify_resource_token(malformed, resolver, aud=PS)
