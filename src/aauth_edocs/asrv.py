@@ -15,6 +15,8 @@ from typing import Any, Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
+from .controller import ControllerPolicy, issue_controller_decision
+from .edocs import Dataflow
 from .errors import AAuthError, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
 from .headers import APPROVAL, CLAIMS, INTERACTION, build_requirement
@@ -37,7 +39,11 @@ def create_as(
     token_path: str = "/token",
     jwks_path: str = "/jwks.json",
     pending_path: str = "/pending",
+    sentinel: str | None = None,
+    controller_policy: ControllerPolicy | None = None,
 ) -> Flask:
+    if (sentinel is None) != (controller_policy is None):
+        raise ValueError("sentinel and controller_policy must be configured together")
     app = app or Flask("aauth-as")
     key = key or SigningKey.generate(kid="as")
     resolver = JwksResolver(transport or RequestsTransport())
@@ -82,15 +88,43 @@ def create_as(
             raise AAuthError(INVALID_REQUEST, 400, "resource_token and agent_token are required")
 
         agent_claims = verify_agent_token(body["agent_token"], resolver)
-        rt_claims = verify_resource_token(  # §6.7.2, aud must be this AS
+        edocs_request = sentinel is not None and ps_url == sentinel
+        expected_aud = sentinel if edocs_request else issuer
+        rt_claims = verify_resource_token(
             body["resource_token"],
             resolver,
-            aud=issuer,
+            aud=expected_aud,
             agent=agent_claims["sub"],
             agent_jkt=jwk_thumbprint(agent_claims["cnf"]["jwk"]),
         )
 
         context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
+        if edocs_request:
+            scope = rt_claims.get("scope")
+            if not isinstance(scope, str) or len(scope.split()) != 1:
+                raise AAuthError(INVALID_TOKEN, 400, "eDocs resource token must contain exactly one scope")
+            if not all(
+                isinstance(rt_claims.get(name), str) and rt_claims[name]
+                for name in ("source_agent", "edoc_id")
+            ) or not isinstance(rt_claims.get("controllers"), list):
+                raise AAuthError(INVALID_TOKEN, 400, "eDocs resource token claims are required")
+            proposal = Dataflow(
+                source=rt_claims["source_agent"],
+                function=scope,
+                document=rt_claims["edoc_id"],
+                destination=agent_claims["sub"],
+            )
+            token = issue_controller_decision(
+                proposal=proposal,
+                policy=controller_policy,
+                issuer=issuer,
+                sentinel=sentinel,
+                agent_jwk=agent_claims["cnf"]["jwk"],
+                controllers=rt_claims["controllers"],
+                key=key,
+            )
+            return {"auth_token": token, "expires_in": 3600}
+
         granted = policy(ps_url, agent_claims, rt_claims) if policy else rt_claims.get("scope")
         if granted is None:
             raise AAuthError("denied", 403, "resource policy denied the request")
