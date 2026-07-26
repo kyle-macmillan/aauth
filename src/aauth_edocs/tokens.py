@@ -16,6 +16,7 @@ from typing import Callable
 from joserfc import jwt as joserfc_jwt
 from joserfc.jwk import OKPKey
 
+from .edocs import Dataflow
 from .errors import AAuthError, INVALID_TOKEN
 from .httpsig import KeyResolver, verify_jwt
 from .ids import DWK_ACCESS, DWK_AGENT, DWK_PERSON, DWK_RESOURCE
@@ -24,6 +25,7 @@ from .keys import SigningKey, jwk_thumbprint
 AGENT_TYP = "aa-agent+jwt"
 RESOURCE_TYP = "aa-resource+jwt"
 AUTH_TYP = "aa-auth+jwt"
+CONDITIONAL_AUTH_TYP = "aa-conditional-auth+jwt"
 
 Now = Callable[[], float]
 _EDOC_CLAIMS = ("source_agent", "edoc_id", "controllers")
@@ -154,6 +156,47 @@ def issue_auth_token(
     )
 
 
+def issue_conditional_auth_token(
+    *,
+    issuer: str,
+    aud: str,
+    agent: str,
+    cnf_jwk: dict,
+    scope: str,
+    source_agent: str,
+    edoc_id: str,
+    controllers: list[str] | tuple[str, ...],
+    prerequisite: Dataflow,
+    key: SigningKey,
+    lifetime: int = 3600,
+    now: Now = time.time,
+) -> str:
+    """AS side: approve an eDocs proposal subject to one prerequisite.
+
+    This intermediate token is addressed to the Sentinel and cannot be used
+    as a normal resource authorization.
+    """
+    if not isinstance(prerequisite, Dataflow):
+        raise ValueError("prerequisite must be a Dataflow")
+    edocs = _edocs_claims(source_agent, edoc_id, controllers)
+    return _issue(
+        CONDITIONAL_AUTH_TYP,
+        key,
+        {
+            "iss": issuer,
+            "dwk": DWK_ACCESS,
+            "aud": aud,
+            "agent": agent,
+            "cnf": {"jwk": cnf_jwk},
+            "scope": scope,
+            **edocs,
+            "prerequisite": _encode_dataflow(prerequisite),
+        },
+        lifetime,
+        now,
+    )
+
+
 def _decode(token: str, key_resolver: KeyResolver, expect_typ: str, now: Now) -> dict:
     header, claims = verify_jwt(token, key_resolver, now=now)
     if header.get("typ") != expect_typ:
@@ -263,10 +306,69 @@ def verify_auth_token(
     return claims
 
 
+def verify_conditional_auth_token(
+    token: str,
+    key_resolver: KeyResolver,
+    *,
+    issuer: str,
+    aud: str,
+    agent: str,
+    signing_jwk: dict,
+    source_agent: str,
+    scope: str,
+    edoc_id: str,
+    controllers: list[str] | tuple[str, ...],
+    now: Now = time.time,
+) -> Dataflow:
+    """Sentinel-side verification of one controller AS's conditional approval."""
+    claims = _decode(token, key_resolver, CONDITIONAL_AUTH_TYP, now)
+    _validate_edocs_claims(claims)
+    if claims.get("iss") != issuer:
+        raise AAuthError(INVALID_TOKEN, detail="conditional token issuer mismatch")
+    if claims.get("dwk") != DWK_ACCESS:
+        raise AAuthError(INVALID_TOKEN, detail="conditional token dwk must be aauth-access.json")
+    if claims.get("aud") != aud:
+        raise AAuthError(INVALID_TOKEN, detail=f"conditional token aud is {claims.get('aud')}, not us")
+    if claims.get("agent") != agent:
+        raise AAuthError(INVALID_TOKEN, detail="conditional token agent mismatch")
+    _check_cnf(claims, signing_jwk)
+    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
+    return _decode_dataflow(claims.get("prerequisite"))
+
+
 def _check_cnf(claims: dict, signing_jwk: dict) -> None:
     cnf_jwk = (claims.get("cnf") or {}).get("jwk")
     if not cnf_jwk or jwk_thumbprint(cnf_jwk) != jwk_thumbprint(signing_jwk):
         raise AAuthError(INVALID_TOKEN, detail="token cnf.jwk does not match the signing key")
+
+
+def _encode_dataflow(dataflow: Dataflow) -> dict:
+    value = {
+        "source": dataflow.source,
+        "function": dataflow.function,
+        "document": dataflow.document,
+        "destination": dataflow.destination,
+    }
+    if any(not isinstance(item, str) or not item for item in value.values()):
+        raise ValueError("prerequisite Dataflow fields must be non-empty strings")
+    return value
+
+
+def _decode_dataflow(value: object) -> Dataflow:
+    fields = {"source", "function", "document", "destination"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise AAuthError(
+            INVALID_TOKEN,
+            detail="conditional token prerequisite must contain exactly source, function, document, and destination",
+        )
+    if any(not isinstance(value[name], str) or not value[name] for name in fields):
+        raise AAuthError(INVALID_TOKEN, detail="conditional token prerequisite fields must be non-empty strings")
+    return Dataflow(
+        source=value["source"],
+        function=value["function"],
+        document=value["document"],
+        destination=value["destination"],
+    )
 
 
 def _edocs_claims(

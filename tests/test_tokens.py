@@ -2,13 +2,16 @@ import pytest
 
 from aauth_edocs import (
     AAuthError,
+    Dataflow,
     check_resource_challenge,
     issue_agent_token,
     issue_auth_token,
+    issue_conditional_auth_token,
     issue_resource_token,
     peek_jwt,
     verify_agent_token,
     verify_auth_token,
+    verify_conditional_auth_token,
     verify_resource_token,
 )
 from conftest import AP, PS, RESOURCE
@@ -150,6 +153,178 @@ def test_alg_none_rejected(ps_key, agent_key, agent, resolver):
 EDOC_SOURCE = "aauth:source@ap.example"
 EDOC_ID = "doc-123"
 EDOC_CONTROLLERS = ("https://as-a.example", "https://as-b.example")
+SENTINEL = "https://sentinel.example"
+CONTROLLER_AS = PS
+
+
+def _prerequisite() -> Dataflow:
+    return Dataflow(
+        source="aauth:upstream@ap.example",
+        function="prepare@1",
+        document="doc-input",
+        destination="aauth:destination@ap.example",
+    )
+
+
+def _conditional_token(ps_key, agent_key, agent, **changes):
+    values = {
+        "issuer": CONTROLLER_AS,
+        "aud": SENTINEL,
+        "agent": agent,
+        "cnf_jwk": agent_key.public_jwk,
+        "scope": "identity@1",
+        "source_agent": EDOC_SOURCE,
+        "edoc_id": EDOC_ID,
+        "controllers": EDOC_CONTROLLERS,
+        "prerequisite": _prerequisite(),
+        "key": ps_key,
+    }
+    values.update(changes)
+    return issue_conditional_auth_token(**values)
+
+
+def _verify_conditional(token, resolver, agent_key, requesting_agent, **changes):
+    values = {
+        "issuer": CONTROLLER_AS,
+        "aud": SENTINEL,
+        "agent": requesting_agent,
+        "signing_jwk": agent_key.public_jwk,
+        "source_agent": EDOC_SOURCE,
+        "scope": "identity@1",
+        "edoc_id": EDOC_ID,
+        "controllers": EDOC_CONTROLLERS,
+    }
+    values.update(changes)
+    return verify_conditional_auth_token(token, resolver, **values)
+
+
+def test_conditional_auth_token_roundtrip(ps_key, agent_key, agent, resolver):
+    token = _conditional_token(ps_key, agent_key, agent)
+
+    assert _verify_conditional(token, resolver, agent_key, agent) == _prerequisite()
+    header, claims = peek_jwt(token)
+    assert header["typ"] == "aa-conditional-auth+jwt"
+    assert claims["dwk"] == "aauth-access.json"
+    assert claims["aud"] == SENTINEL
+
+
+def test_conditional_auth_token_requires_dataflow(ps_key, agent_key, agent):
+    with pytest.raises(ValueError, match="Dataflow"):
+        _conditional_token(ps_key, agent_key, agent, prerequisite={})
+    with pytest.raises(ValueError, match="fields"):
+        _conditional_token(
+            ps_key,
+            agent_key,
+            agent,
+            prerequisite=Dataflow(source="", function="f", document="d", destination="b"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("expected", "message"),
+    [
+        ({"issuer": "https://other-as.example"}, "issuer"),
+        ({"aud": "https://other-sentinel.example"}, "aud"),
+        ({"agent": "aauth:other@ap.example"}, "agent"),
+        ({"source_agent": "aauth:other@ap.example"}, "source_agent"),
+        ({"scope": "other@1"}, "scope"),
+        ({"edoc_id": "doc-456"}, "edoc_id"),
+        ({"controllers": tuple(reversed(EDOC_CONTROLLERS))}, "controllers"),
+    ],
+)
+def test_conditional_auth_token_binding_mismatch(
+    ps_key, agent_key, agent, resolver, expected, message
+):
+    token = _conditional_token(ps_key, agent_key, agent)
+
+    with pytest.raises(AAuthError, match=message):
+        _verify_conditional(token, resolver, agent_key, agent, **expected)
+
+
+def test_conditional_auth_token_wrong_confirmation_key(ps_key, agent_key, agent, resolver):
+    from aauth_edocs import SigningKey
+
+    token = _conditional_token(ps_key, agent_key, agent)
+    with pytest.raises(AAuthError, match="cnf.jwk"):
+        _verify_conditional(
+            token,
+            resolver,
+            agent_key,
+            agent,
+            signing_jwk=SigningKey.generate().public_jwk,
+        )
+
+
+def test_conditional_auth_token_rejects_wrong_dwk(ps_key, agent_key, agent, resolver):
+    from joserfc import jwt as joserfc_jwt
+    from joserfc.jwk import OKPKey
+
+    token = _conditional_token(ps_key, agent_key, agent)
+    header, claims = peek_jwt(token)
+    claims["dwk"] = "aauth-person.json"
+    malformed = joserfc_jwt.encode(
+        header,
+        claims,
+        OKPKey.import_key(ps_key.private_jwk()),
+        algorithms=["EdDSA"],
+    )
+
+    with pytest.raises(AAuthError, match="dwk"):
+        _verify_conditional(malformed, resolver, agent_key, agent)
+
+
+@pytest.mark.parametrize(
+    "prerequisite",
+    [
+        None,
+        {},
+        {"source": "a", "function": "f", "document": "d"},
+        {"source": "a", "function": "f", "document": "d", "destination": "b", "extra": "x"},
+        {"source": "", "function": "f", "document": "d", "destination": "b"},
+        {"source": "a", "function": 1, "document": "d", "destination": "b"},
+    ],
+)
+def test_conditional_auth_token_rejects_malformed_prerequisite(
+    ps_key, agent_key, agent, resolver, prerequisite
+):
+    from joserfc import jwt as joserfc_jwt
+    from joserfc.jwk import OKPKey
+
+    token = _conditional_token(ps_key, agent_key, agent)
+    header, claims = peek_jwt(token)
+    claims["prerequisite"] = prerequisite
+    malformed = joserfc_jwt.encode(
+        header,
+        claims,
+        OKPKey.import_key(ps_key.private_jwk()),
+        algorithms=["EdDSA"],
+    )
+
+    with pytest.raises(AAuthError, match="prerequisite"):
+        _verify_conditional(malformed, resolver, agent_key, agent)
+
+
+def test_conditional_and_normal_auth_types_are_not_interchangeable(
+    ps_key, agent_key, agent, resolver
+):
+    conditional = _conditional_token(ps_key, agent_key, agent)
+    with pytest.raises(AAuthError, match="typ"):
+        verify_auth_token(conditional, resolver, aud=SENTINEL)
+
+    normal = issue_auth_token(
+        issuer=CONTROLLER_AS,
+        dwk="aauth-access.json",
+        aud=SENTINEL,
+        agent=agent,
+        cnf_jwk=agent_key.public_jwk,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        key=ps_key,
+    )
+    with pytest.raises(AAuthError, match="typ"):
+        _verify_conditional(normal, resolver, agent_key, agent)
 
 
 def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver):

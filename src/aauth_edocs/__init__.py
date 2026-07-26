@@ -25,13 +25,16 @@ from .metadata import JwksResolver, Metadata, build_metadata, fetch_metadata, st
 from .tokens import (
     AGENT_TYP,
     AUTH_TYP,
+    CONDITIONAL_AUTH_TYP,
     RESOURCE_TYP,
     check_resource_challenge,
     issue_agent_token,
     issue_auth_token,
+    issue_conditional_auth_token,
     issue_resource_token,
     verify_agent_token,
     verify_auth_token,
+    verify_conditional_auth_token,
     verify_resource_token,
 )
 
