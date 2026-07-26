@@ -2,6 +2,7 @@
 internal eDocs experimentation. See IMPLEMENTATION_PLAN.md for scope and
 the simplifications relative to the spec."""
 
+from .controller import ControllerPolicy, issue_controller_decision
 from .deferred import PendingStore, poll
 from .edocs import Dataflow, ExactRule, FunctionDescriptor, ResourceBinding, SentinelRegistry
 from .errors import AAuthError
