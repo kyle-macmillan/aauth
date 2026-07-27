@@ -97,13 +97,20 @@ def test_sentinel_registry_holds_injected_authority_and_provenance_state():
     flow = _flow()
     registry = SentinelRegistry(
         resource_bindings={source: binding},
-        controllers={"doc-123": ("https://as-a.example", "https://as-b.example")},
+        resource_owner_ases={"https://resource.example": "https://owner-as.example"},
+        controllers={
+            ("https://resource.example", "doc-123"): (
+                "https://as-a.example",
+                "https://as-b.example",
+            )
+        },
         functions={descriptor.id: descriptor},
         materialized={flow},
     )
 
     assert registry.resource_bindings[source] == binding
-    assert registry.controllers["doc-123"] == (
+    assert registry.resource_owner_ases["https://resource.example"] == "https://owner-as.example"
+    assert registry.controllers[("https://resource.example", "doc-123")] == (
         "https://as-a.example",
         "https://as-b.example",
     )
@@ -114,4 +121,3 @@ def test_sentinel_registry_holds_injected_authority_and_provenance_state():
 def test_sentinel_registry_defaults_are_not_shared():
     first = SentinelRegistry()
     second = SentinelRegistry()
-

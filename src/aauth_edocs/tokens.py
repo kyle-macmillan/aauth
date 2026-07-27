@@ -385,8 +385,8 @@ def _edocs_claims(
         raise ValueError("source_agent must be a non-empty string")
     if not isinstance(edoc_id, str) or not edoc_id:
         raise ValueError("edoc_id must be a non-empty string")
-    if not isinstance(controllers, (list, tuple)) or not controllers:
-        raise ValueError("controllers must be a non-empty list or tuple")
+    if not isinstance(controllers, (list, tuple)):
+        raise ValueError("controllers must be a list or tuple")
     if any(not isinstance(controller, str) or not controller for controller in controllers):
         raise ValueError("controllers must contain non-empty strings")
     if len(set(controllers)) != len(controllers):

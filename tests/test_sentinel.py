@@ -95,7 +95,9 @@ def _aggregate(
     registry=None,
     advisory_controllers=ADVISORY,
 ):
-    registry = registry or SentinelRegistry(controllers={proposal.document: (AS_A, AS_B)})
+    registry = registry or SentinelRegistry(
+        controllers={(RESOURCE, proposal.document): (AS_A, AS_B)}
+    )
     token = aggregate_controller_decisions(
         proposal=proposal,
         resource_issuer=RESOURCE,
@@ -172,7 +174,7 @@ def test_satisfied_conditional_and_unconditional_approvals_succeed(
         ),
     }
     registry = SentinelRegistry(
-        controllers={proposal.document: (AS_A, AS_B)},
+        controllers={(RESOURCE, proposal.document): (AS_A, AS_B)},
         materialized={prerequisite},
     )
 
@@ -208,7 +210,7 @@ def test_missing_prerequisite_denies_without_materializing(
             agent_key,
         ),
     }
-    registry = SentinelRegistry(controllers={proposal.document: (AS_A, AS_B)})
+    registry = SentinelRegistry(controllers={(RESOURCE, proposal.document): (AS_A, AS_B)})
 
     with pytest.raises(AAuthError, match="has not materialized") as caught:
         _aggregate(
@@ -294,7 +296,7 @@ def test_mismatched_controller_binding_denies_without_materializing(
         AS_A: _normal_response(AS_A, controller_keys[AS_A], proposal, agent_key, **changes),
         AS_B: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
     }
-    registry = SentinelRegistry(controllers={proposal.document: (AS_A, AS_B)})
+    registry = SentinelRegistry(controllers={(RESOURCE, proposal.document): (AS_A, AS_B)})
 
     with pytest.raises(AAuthError, match=message):
         _aggregate(
@@ -324,7 +326,7 @@ def test_wrong_agent_confirmation_key_denies_without_materializing(
         ),
         AS_B: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
     }
-    registry = SentinelRegistry(controllers={proposal.document: (AS_A, AS_B)})
+    registry = SentinelRegistry(controllers={(RESOURCE, proposal.document): (AS_A, AS_B)})
 
     with pytest.raises(AAuthError, match="cnf.jwk"):
         _aggregate(
@@ -357,7 +359,7 @@ def test_unsupported_controller_token_type_denies_without_materializing(
         ),
         AS_B: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
     }
-    registry = SentinelRegistry(controllers={proposal.document: (AS_A, AS_B)})
+    registry = SentinelRegistry(controllers={(RESOURCE, proposal.document): (AS_A, AS_B)})
 
     with pytest.raises(AAuthError, match="unsupported controller token type"):
         _aggregate(

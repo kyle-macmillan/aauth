@@ -21,9 +21,10 @@ Traditional AAuth remains on `aauth/main`; all eDocs extension work belongs on
 ### `aauth`
 
 - Extension branch: `edocs-demo`, created from `main` at `b85bc86`.
-- Logical changes 3 and 4 add the core eDocs domain models and extended
-  resource/auth token claims and validators.
-- Latest complete test result: 125 passed, 1 skipped.
+- The branch now includes the core models and claims, conditional controller
+  tokens, exact controller policy decisions, unanimous Sentinel aggregation,
+  optional eDocs behavior in the existing AS, and the Sentinel HTTP flow.
+- Latest complete test result: 178 passed, 1 skipped.
 - `main` and `origin/main` were both at `b85bc86`.
 - Older prototypes exist at `origin/edocs` and `origin/chz/sentinel`.
   They are reference material only and must not be merged wholesale. They
@@ -110,6 +111,43 @@ accountability is tied to people through AAuth:
 - a pre-provisioned PS-signed resource binding ties A to the resource.
 
 Do not add a global person identifier to resource tokens or policies.
+
+### Resource-qualified identifiers and unknown-eDoc discovery
+
+An eDoc identifier must be qualified by the resource issuer rather than treated
+as a globally unique resource-chosen string. It may be represented as the pair
+`(resource_issuer, local_edoc_id)` or as a resource-owned URI. This prevents one
+resource from impersonating another resource's identifier without requiring a
+separate registration or Sentinel-assigned ID.
+
+The signed resource token is the discovery assertion for an eDoc that the
+Sentinel does not yet know. The Sentinel first verifies the token and its
+provisioned resource issuer/key binding, then selects candidate controllers:
+
+- if `resource_token.controllers` is non-empty, that list replaces the
+  resource-owner AS for this eDoc;
+- if it is empty, use the resource owner's provisioned AS;
+- the resource-owner-AS association is trusted Sentinel configuration and is
+  not supplied by the resource token.
+
+The Sentinel contacts every candidate AS. A candidate becomes authoritative
+only after authenticating itself and returning a valid decision for the exact
+qualified eDoc and proposed dataflow. If every candidate confirms, the
+Sentinel caches that set as the authoritative controller mapping. Subsequent
+requests use the cached mapping; a resource token cannot replace it by
+supplying a different advisory list.
+
+The eDocs claim group must still include `controllers`, but it may be an empty
+JSON list to request the resource-owner-AS fallback. Duplicate or empty-string
+controller entries remain invalid.
+
+This model protects eDoc identity but does not prove content identity. A
+resource cannot claim another issuer's qualified ID, but it can copy document
+bytes and publish them under a new qualified ID that it owns. Detecting that
+requires a content digest, signed provenance, or an external ownership
+registry. Those integrity mechanisms are deliberately deferred; for the demo,
+the Sentinel records and audits the resource/key and controller assertions it
+actually verified.
 
 The proactive resource authorization request supplies:
 
@@ -376,6 +414,9 @@ Run:
 - Boolean condition trees and wildcard/set-valued policies.
 - Persistent controller, function, resource-binding, policy, and provenance
   stores.
+- Durable qualified-eDoc discovery caches and resource-owner-AS associations.
+- Content digests, signed provenance, or external ownership registries for
+  detecting copied content published under a new qualified identifier.
 - Recording materialization after verified execution rather than issuance.
 - External function retrieval and runtime digest enforcement.
 - Verifier/TEE claim integrity.
@@ -395,11 +436,25 @@ Completed on `aauth/edocs-demo`:
 - extended resource and auth token claims for source agent, eDoc ID, and
   controllers;
 - complete-group, shape, and exact expected-binding validation;
-- 125 passed, 1 skipped.
+- Sentinel-only conditional authorization token issuance and verification;
+- exact-match, default-deny controller policy evaluation;
+- normal and conditional controller decisions addressed to the Sentinel;
+- optional eDocs behavior in the existing AAuth AS while preserving its
+  traditional AAuth path;
+- unanimous multi-controller aggregation, prerequisite checking, final
+  resource-audience token issuance, and provenance recording;
+- a Sentinel HTTP adapter that authenticates the destination PS, verifies the
+  original agent and resource tokens, enforces provisioned resource bindings
+  and registries, calls every authoritative controller AS, and returns the
+  aggregate final token;
+- 178 passed, 1 skipped.
 
-The next proposed logical change should add the conditional authorization token
-type and its focused issuance/verification tests. It must remain Sentinel-only:
-ordinary auth-token verification must reject it by token type.
+The next proposed logical change should connect the existing Person Server
+approval and federation behavior to the eDocs fields and run the complete
+Agent -> Resource -> PS -> Sentinel -> controller ASes flow in one integration
+test. The PS must display the full proposed dataflow and advisory controllers,
+require authenticated approval, forward the unchanged agent and resource
+tokens, and relay the Sentinel's final token or denial.
 
 Before making it:
 

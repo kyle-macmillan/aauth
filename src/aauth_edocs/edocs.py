@@ -61,6 +61,7 @@ class SentinelRegistry:
     """Injected in-memory authority and provenance state for the demo."""
 
     resource_bindings: dict[str, ResourceBinding] = field(default_factory=dict)
-    controllers: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    resource_owner_ases: dict[str, str] = field(default_factory=dict)
+    controllers: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
     functions: dict[str, FunctionDescriptor] = field(default_factory=dict)
     materialized: set[Dataflow] = field(default_factory=set)

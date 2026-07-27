@@ -406,7 +406,7 @@ def test_edocs_claim_group_required_at_issuance(resource_key, agent_key, agent, 
         )
 
 
-@pytest.mark.parametrize("controllers", [[], (), ["https://as.example", "https://as.example"], [""]])
+@pytest.mark.parametrize("controllers", [["https://as.example", "https://as.example"], [""]])
 def test_edocs_controllers_validated_at_issuance(resource_key, agent_key, agent, controllers):
     with pytest.raises(ValueError, match="controllers"):
         issue_resource_token(
@@ -420,6 +420,23 @@ def test_edocs_controllers_validated_at_issuance(resource_key, agent_key, agent,
             controllers=controllers,
             key=resource_key,
         )
+
+
+def test_edocs_controllers_may_be_empty(resource_key, agent_key, agent, resolver):
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=[],
+        key=resource_key,
+    )
+
+    claims = verify_resource_token(token, resolver, aud=PS, controllers=[])
+    assert claims["controllers"] == []
 
 
 @pytest.mark.parametrize(
