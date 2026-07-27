@@ -305,6 +305,46 @@ def test_consent_requires_authenticated_person(world):
     assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") not in ps["consents"]
 
 
+def test_authenticated_person_can_review_verified_pending_request(world):
+    transport, _ = world
+    ps_url = "http://ps-review.local"
+    transport.add(
+        ps_url,
+        create_ps(ps_url, transport=transport, policy=lambda _agent, _resource: "pending"),
+    )
+    session = AgentSession.enroll(AP_URL, "review", transport, ps=ps_url)
+    pid = start_pending_consent(transport, session, ps_url)
+
+    anonymous = transport.request("GET", f"{ps_url}/consent/{pid}")
+    assert anonymous.status_code == 401
+
+    login_person(transport, ps_url)
+    first = transport.request("GET", f"{ps_url}/consent/{pid}")
+    second = transport.request("GET", f"{ps_url}/consent/{pid}")
+
+    assert first.status_code == 200
+    assert first.json()["agent"] == session.agent_id
+    assert first.json()["resource"] == RESOURCE_URL
+    assert first.json()["audience"] == ps_url
+    assert first.json()["scope"] == "docs.read"
+    assert first.json()["claims"]["agent"] == session.agent_id
+    assert first.json()["claims"]["iss"] == RESOURCE_URL
+    assert "resource_token" not in first.json()
+    assert "agent_token" not in first.json()
+    assert second.json() == first.json()
+    assert transport.request("GET", f"{ps_url}/pending/{pid}").status_code == 202
+
+    recorded = transport.request(
+        "POST",
+        f"{ps_url}/consent/{pid}",
+        json={"decision": "deny"},
+    )
+    completed_review = transport.request("GET", f"{ps_url}/consent/{pid}")
+
+    assert recorded.status_code == 200
+    assert completed_review.status_code == 404
+
+
 def test_consent_rejects_wrong_person_login(world):
     transport, _ = world
     ps_url = "http://ps-wrong-person.local"

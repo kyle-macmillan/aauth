@@ -293,6 +293,24 @@ def create_ps(
             store.deny(pid, detail="the user declined the request")
         return {"status": "recorded"}
 
+    @app.get("/consent/<pid>")
+    def review_consent(pid: str):
+        """Return the already-verified request facts shown for human review."""
+        if session.get("person") != person:
+            raise AAuthError(INVALID_REQUEST, 401, "login required")
+        context = pending_requests.get(pid)
+        if context is None or context.get("kind") == "permission":
+            raise AAuthError(INVALID_REQUEST, 404, "no such pending consent")
+        rt_claims = context["rt_claims"]
+        requesting_agent = context.get("subagent_claims") or context["agent_claims"]
+        return {
+            "agent": requesting_agent["sub"],
+            "resource": rt_claims["iss"],
+            "audience": rt_claims["aud"],
+            "scope": rt_claims.get("scope"),
+            "claims": rt_claims,
+        }
+
     @app.post("/interaction/<pid>")
     def interaction(pid: str):
         if session.get("person") != person:
