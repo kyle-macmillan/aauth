@@ -1,16 +1,17 @@
 """Access Server: evaluates resource policy and issues auth tokens (§9.1).
 
 Only PSes call the AS token endpoint (§9.3); they authenticate with the
-jwks_uri Signature-Key scheme. Internal-experimentation scope: the policy
-hook decides on the spot (no requirement=claims/interaction rounds unless
-the policy defers), grants are dataflow claims, and any resolvable PS is
-trusted.
+jwks_uri Signature-Key scheme. Internal-experimentation scope: registered
+PolicyRules decide grant/deny (empty list grants), grants are dataflow
+claims, and any resolvable PS is trusted. An optional `policy` callable
+remains only for deferred requirements (claims/interaction/approval/payment).
 
 Module is named `asrv` because `as` is a Python keyword.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from flask import Flask, request
@@ -25,8 +26,77 @@ from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
-# policy(...) -> granted dataflow dict | None (deny) | deferred dict (has "requirement")
+# Optional override for deferred requirements:
+# granted dataflow | None (deny) | deferred dict (has "requirement").
 Policy = Callable[[str, dict, dict], "dict[str, Any] | None"]
+
+WILDCARD = "*"
+
+
+@dataclass(frozen=True)
+class PolicyRule:
+    """Lightweight access rule: who may apply which function to which data element."""
+
+    source_agent_id: str
+    function_id: str
+    de_id: str
+    dest_agent_id: str
+    # condition_id: str = WILDCARD
+
+
+def create_rule(
+    source_agent_id: str,
+    function_id: str,
+    de_id: str,
+    dest_agent_id: str,
+    # condition_id: str = WILDCARD,
+) -> PolicyRule:
+    """Create a rule. Any field may be `"*"` (or omitted) to match anything."""
+    return PolicyRule(
+        source_agent_id=source_agent_id,
+        function_id=function_id,
+        de_id=de_id,
+        dest_agent_id=dest_agent_id,
+        # condition_id=condition_id,
+    )
+
+
+def _field_matches(allowed: str, requested: str) -> bool:
+    return allowed == WILDCARD or allowed == requested
+
+
+def check_policy_rule(policies: list[PolicyRule], requested: PolicyRule) -> bool:
+    """Return True if `requested` matches a registered rule (or no rules are set).
+
+    Registered rule fields set to `"*"` are wildcards and match any request
+    value for that field.
+    """
+    if not policies:
+        return True
+    for rule in policies:
+        if (
+            _field_matches(rule.source_agent_id, requested.source_agent_id)
+            and _field_matches(rule.function_id, requested.function_id)
+            and _field_matches(rule.de_id, requested.de_id)
+            and _field_matches(rule.dest_agent_id, requested.dest_agent_id)
+        ):
+            return True
+    return False
+
+
+def request_rule(agent_claims: dict, rt_claims: dict) -> PolicyRule:
+    """Build the policy rule implied by a token request.
+
+    Dataflow is resource → agent: source is the resource (`iss`), dest is
+    the agent (`sub` / resource-token `agent`).
+    """
+    dataflow = rt_claims["dataflow"]
+    return PolicyRule(
+        source_agent_id=rt_claims["iss"],
+        function_id=dataflow["function"],
+        de_id=dataflow["data"],
+        dest_agent_id=agent_claims["sub"],
+    )
 
 
 def create_as(
@@ -44,7 +114,32 @@ def create_as(
     resolver = JwksResolver(transport or RequestsTransport())
     store = PendingStore(base_path=f"{issuer}{pending_path}")
     pending_requests: dict[str, dict] = {}
-    app.extensions["aauth_as"] = {"issuer": issuer, "key": key, "store": store}
+    policies: list[PolicyRule] = []
+
+    def add_policy_rule(
+        source_agent_id: str,
+        function_id: str,
+        de_id: str,
+        dest_agent_id: str,
+        # condition_id: str = WILDCARD,
+    ) -> PolicyRule:
+        rule = create_rule(
+            source_agent_id=source_agent_id,
+            function_id=function_id,
+            de_id=de_id,
+            dest_agent_id=dest_agent_id,
+            # condition_id=condition_id,
+        )
+        policies.append(rule)
+        return rule
+
+    app.extensions["aauth_as"] = {
+        "issuer": issuer,
+        "key": key,
+        "store": store,
+        "policies": policies,
+        "create_rule": add_policy_rule,
+    }
 
     if "aauth_as_error_handler" not in app.extensions:
         app.extensions["aauth_as_error_handler"] = True
@@ -96,7 +191,7 @@ def create_as(
         1. Verify the incoming request is signed by Sentinel/PS.
         2. Verify both resource and agent tokens are present.
         3. Verify resource and agent tokens are valid.
-        4. Check policy
+        4. Check policy rules (or optional policy override)
         5. Choose to deny, defer, or issue a token
 
         Request (HTTP-signed by the Sentinel/PS, jwks_uri):
@@ -132,7 +227,14 @@ def create_as(
 
         context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
         default_grant = rt_claims["dataflow"]
-        granted = policy(ps_url, agent_claims, rt_claims) if policy else default_grant
+        if policy is not None:
+            granted = policy(ps_url, agent_claims, rt_claims)
+        else:
+            granted = (
+                default_grant
+                if check_policy_rule(policies, request_rule(agent_claims, rt_claims))
+                else None
+            )
         if granted is None:
             raise AAuthError("denied", 403, "resource policy denied the request")
         if isinstance(granted, dict) and "requirement" in granted:

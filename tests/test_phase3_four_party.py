@@ -46,13 +46,13 @@ def world():
     ps_app = create_ps(PS_URL, transport=transport)
     transport.add(PS_URL, ps_app)
 
-    def grant_read_dataflows(ps_url, agent_claims, rt_claims):
-        df = rt_claims.get("dataflow")
-        if df and df.get("function") == "read":
-            return df
-        return None
-
-    as_app = create_as(AS_URL, transport=transport, policy=grant_read_dataflows)
+    as_app = create_as(AS_URL, transport=transport)
+    as_app.extensions["aauth_as"]["create_rule"](
+        source_agent_id="*",
+        function_id="read",
+        de_id="*",
+        dest_agent_id="*",
+    )
     transport.add(AS_URL, as_app)
 
     config = ResourceConfig(

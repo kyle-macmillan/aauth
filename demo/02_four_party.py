@@ -70,14 +70,6 @@ def make_resource() -> Flask:
     return app
 
 
-def as_policy(ps_url, agent_claims, rt_claims):
-    """Grant read dataflows; deny anything else."""
-    df = rt_claims.get("dataflow")
-    if df and df.get("function") == "read":
-        return df
-    return None
-
-
 def serve(app: Flask, port: int) -> None:
     threading.Thread(
         target=lambda: app.run(port=port, use_reloader=False), daemon=True
@@ -98,7 +90,14 @@ def main() -> None:
     serve(create_ap(AP_URL), 5001)
     serve(make_resource(), 5002)
     serve(create_ps(PS_URL), 5003)
-    serve(create_as(AS_URL, policy=as_policy), 5004)
+    as_app = create_as(AS_URL)
+    as_app.extensions["aauth_as"]["create_rule"](
+        source_agent_id="*",
+        function_id="read",
+        de_id="*",
+        dest_agent_id="*",
+    )
+    serve(as_app, 5004)
 
     wait_for(f"{AP_URL}/.well-known/aauth-agent.json")
     wait_for(f"{RESOURCE_URL}/.well-known/aauth-resource.json")

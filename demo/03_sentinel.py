@@ -95,14 +95,6 @@ def make_resource() -> Flask:
     return app
 
 
-def as_policy(ps_url, agent_claims, rt_claims):
-    """Grant read dataflows; deny anything else."""
-    df = rt_claims.get("dataflow")
-    if df and df.get("function") == "read":
-        return df
-    return None
-
-
 def checkpoint(app: Flask, label: str) -> Flask:
     """Print every request; for POST /token also dump token iss/aud details."""
 
@@ -165,7 +157,14 @@ def main() -> None:
     serve(create_ap(AP_URL), 5001)
     serve(make_resource(), 5002)
     serve(checkpoint(create_ps(PS_URL), "PS"), 5003)
-    serve(checkpoint(create_as(AS_URL, policy=as_policy), "AS"), 5004)
+    as_app = create_as(AS_URL)
+    as_app.extensions["aauth_as"]["create_rule"](
+        source_agent_id="*",
+        function_id="read",
+        de_id="*",
+        dest_agent_id="*",
+    )
+    serve(checkpoint(as_app, "AS"), 5004)
     serve(checkpoint(create_sentinel(SENTINEL_URL), "sentinel"), 5005)
 
     wait_for(f"{AP_URL}/.well-known/aauth-agent.json")
