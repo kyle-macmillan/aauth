@@ -1,5 +1,7 @@
 """Three-party (PS-asserted) access integration tests (§4.1.3)."""
 
+import json
+
 import pytest
 from flask import Flask, g
 
@@ -29,38 +31,45 @@ RESOURCE_URL = "http://resource.local"
 DOCS_URL = "http://docs.local"
 INTERACTION_URL = "http://interaction-resource.local"
 
+DATAFLOW = {"data": "docs", "function": "read"}
+DATAFLOW_WRITE = {"data": "docs", "function": "write"}
 
-def make_resource(url: str, transport: LoopbackTransport, scope: str) -> ResourceConfig:
+
+def consent_grant(df=DATAFLOW):
+    return json.dumps(df, sort_keys=True, separators=(",", ":"))
+
+
+def make_resource(url: str, transport: LoopbackTransport, dataflow: dict) -> ResourceConfig:
     config = ResourceConfig(issuer=url, key=SigningKey.generate(), key_resolver=JwksResolver(transport))
     app = Flask(__name__)
     install_resource(app, config)
 
     @app.get("/api/data")
-    @require_auth_token(config, scope=scope)
+    @require_auth_token(config, dataflow=dataflow)
     def data():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"sub": claims.get("sub"), "scope": claims.get("scope"), "iss": claims.get("iss")}
+        return {"sub": claims.get("sub"), "dataflow": claims.get("dataflow"), "iss": claims.get("iss")}
 
     transport.add(url, app)
     return config
 
 
-def make_multi_scope_resource(url: str, transport: LoopbackTransport) -> ResourceConfig:
+def make_multi_dataflow_resource(url: str, transport: LoopbackTransport) -> ResourceConfig:
     config = ResourceConfig(issuer=url, key=SigningKey.generate(), key_resolver=JwksResolver(transport))
     app = Flask(__name__)
     install_resource(app, config)
 
     @app.get("/api/read")
-    @require_auth_token(config, scope="docs.read")
+    @require_auth_token(config, dataflow=DATAFLOW)
     def read():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"scope": claims.get("scope")}
+        return {"dataflow": claims.get("dataflow")}
 
     @app.get("/api/write")
-    @require_auth_token(config, scope="docs.write")
+    @require_auth_token(config, dataflow=DATAFLOW_WRITE)
     def write():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"scope": claims.get("scope")}
+        return {"dataflow": claims.get("dataflow")}
 
     transport.add(url, app)
     return config
@@ -72,7 +81,7 @@ def world():
     transport.add(AP_URL, create_ap(AP_URL))
     ps_app = create_ps(PS_URL, transport=transport)
     transport.add(PS_URL, ps_app)
-    make_resource(RESOURCE_URL, transport, scope="docs.read")
+    make_resource(RESOURCE_URL, transport, dataflow=DATAFLOW)
     return transport, ps_app
 
 
@@ -90,7 +99,7 @@ def start_pending_consent(transport: LoopbackTransport, session: AgentSession, p
     authz = HttpRequest("POST", f"{RESOURCE_URL}/authorize", {})
     sign(authz, session.key, session.agent_token)
     authz_response = transport.request(
-        "POST", authz.url, headers=authz.headers, json={"scope": "docs.read"}
+        "POST", authz.url, headers=authz.headers, json={"dataflow": DATAFLOW}
     )
     resource_token = authz_response.json()["resource_token"]
 
@@ -103,10 +112,12 @@ def start_pending_consent(transport: LoopbackTransport, session: AgentSession, p
     return token_response.headers["Location"].rsplit("/", 1)[-1]
 
 
-def get_resource_token(transport: LoopbackTransport, session: AgentSession, resource_url: str, scope: str) -> str:
+def get_resource_token(
+    transport: LoopbackTransport, session: AgentSession, resource_url: str, dataflow: dict
+) -> str:
     authz = HttpRequest("POST", f"{resource_url}/authorize", {})
     sign(authz, session.key, session.agent_token)
-    response = transport.request("POST", authz.url, headers=authz.headers, json={"scope": scope})
+    response = transport.request("POST", authz.url, headers=authz.headers, json={"dataflow": dataflow})
     assert response.status_code == 200
     return response.json()["resource_token"]
 
@@ -132,7 +143,7 @@ def test_challenge_flow_end_to_end(session):
     body = response.json()
     assert body["iss"] == PS_URL  # PS-issued auth token
     assert body["sub"] == directed_sub("user-alice", RESOURCE_URL)
-    assert "docs.read" in body["scope"]
+    assert body["dataflow"] == DATAFLOW
     # auth token is cached for subsequent calls
     assert RESOURCE_URL in session._auth_tokens
 
@@ -149,10 +160,11 @@ def test_challenge_header_shape(world, session):
     _, rt_claims = peek_jwt(params["resource-token"])
     assert rt_claims["aud"] == PS_URL  # routed to the agent's PS
     assert rt_claims["agent"] == session.agent_id
+    assert rt_claims["dataflow"] == DATAFLOW
 
 
 def test_proactive_authorize(session):
-    session.authorize(RESOURCE_URL, "docs.read")
+    session.authorize(RESOURCE_URL, DATAFLOW)
     response = session.get(f"{RESOURCE_URL}/api/data")
     assert response.status_code == 200
 
@@ -200,7 +212,7 @@ def test_second_person_cannot_claim_bound_agent(world, session):
 
     bob_session = AgentSession(session.key, session.agent_token, transport)
     with pytest.raises(AAuthError) as err:
-        bob_session.authorize(RESOURCE_URL, "docs.read")
+        bob_session.authorize(RESOURCE_URL, DATAFLOW)
     assert err.value.code == "denied"
     assert bob_app.extensions["aauth_ps"]["agent_bindings"][session.agent_id] == "user-alice"
 
@@ -218,11 +230,11 @@ def test_remembered_consent_bypasses_policy(world):
     transport.add(ps_url, ps_app)
     session = AgentSession.enroll(AP_URL, "remember", transport, ps=ps_url)
 
-    session.authorize(RESOURCE_URL, "docs.read")
-    session.authorize(RESOURCE_URL, "docs.read")
+    session.authorize(RESOURCE_URL, DATAFLOW)
+    session.authorize(RESOURCE_URL, DATAFLOW)
 
     assert calls["count"] == 1
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") in ps_app.extensions["aauth_ps"]["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) in ps_app.extensions["aauth_ps"]["consents"]
 
 
 def test_remembered_consent_is_per_agent(world):
@@ -239,13 +251,13 @@ def test_remembered_consent_is_per_agent(world):
     first = AgentSession.enroll(AP_URL, "per-agent-one", transport, ps=ps_url)
     second = AgentSession.enroll(AP_URL, "per-agent-two", transport, ps=ps_url)
 
-    first.authorize(RESOURCE_URL, "docs.read")
-    second.authorize(RESOURCE_URL, "docs.read")
+    first.authorize(RESOURCE_URL, DATAFLOW)
+    second.authorize(RESOURCE_URL, DATAFLOW)
 
     assert calls["count"] == 2
     consents = ps_app.extensions["aauth_ps"]["consents"]
-    assert ("user-alice", first.agent_id, RESOURCE_URL, "docs.read") in consents
-    assert ("user-alice", second.agent_id, RESOURCE_URL, "docs.read") in consents
+    assert ("user-alice", first.agent_id, RESOURCE_URL, consent_grant()) in consents
+    assert ("user-alice", second.agent_id, RESOURCE_URL, consent_grant()) in consents
 
 
 def test_deferred_grant_records_binding_and_consent(world):
@@ -265,7 +277,7 @@ def test_deferred_grant_records_binding_and_consent(world):
 
     ps = ps_app.extensions["aauth_ps"]
     assert ps["agent_bindings"][session.agent_id] == "user-alice"
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) in ps["consents"]
 
 
 def test_deferred_deny_does_not_bind_or_remember(world):
@@ -287,7 +299,7 @@ def test_deferred_deny_does_not_bind_or_remember(world):
 
     ps = ps_app.extensions["aauth_ps"]
     assert session.agent_id not in ps["agent_bindings"]
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") not in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) not in ps["consents"]
 
 
 def test_consent_requires_authenticated_person(world):
@@ -305,7 +317,7 @@ def test_consent_requires_authenticated_person(world):
 
     ps = ps_app.extensions["aauth_ps"]
     assert session.agent_id not in ps["agent_bindings"]
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") not in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) not in ps["consents"]
 
 
 def test_consent_rejects_wrong_person_login(world):
@@ -325,7 +337,7 @@ def test_ps_rejects_foreign_or_misbound_resource_tokens(world, session):
     # bound to a different key than the requesting agent's
     bad_rt = issue_resource_token(
         issuer=RESOURCE_URL, aud=PS_URL, agent=session.agent_id,
-        agent_jkt=SigningKey.generate().thumbprint, scope="docs.read", key=resource_key,
+        agent_jkt=SigningKey.generate().thumbprint, dataflow=DATAFLOW, key=resource_key,
     )
     req = HttpRequest("POST", f"{PS_URL}/token", {})
     sign(req, session.key, session.agent_token)
@@ -337,10 +349,10 @@ def test_ps_rejects_foreign_or_misbound_resource_tokens(world, session):
     assert ps["issuer"] == PS_URL
 
 
-def test_scope_containment_enforced(world, session):
-    """An auth token granting docs.write does not open a docs.read endpoint."""
+def test_dataflow_containment_enforced(world, session):
+    """An auth token granting write does not open a read endpoint."""
     transport, _ = world
-    session.authorize(RESOURCE_URL, "docs.write")  # mints + exchanges for the wrong scope
+    session.authorize(RESOURCE_URL, DATAFLOW_WRITE)  # mints + exchanges for the wrong dataflow
     req = HttpRequest("GET", f"{RESOURCE_URL}/api/data", {})
     sign(req, session.key, session._auth_tokens[RESOURCE_URL])
     response = transport.request("GET", req.url, headers=req.headers)
@@ -348,16 +360,16 @@ def test_scope_containment_enforced(world, session):
     assert response.json()["error"] == "denied"
 
 
-def test_ps_rejects_requested_scope_broader_than_resource_token(world, session):
+def test_ps_rejects_mismatched_dataflow_request(world, session):
     transport, ps_app = world
-    resource_token = get_resource_token(transport, session, RESOURCE_URL, "docs.read")
+    resource_token = get_resource_token(transport, session, RESOURCE_URL, DATAFLOW)
 
-    response = post_ps_token(transport, session, PS_URL, resource_token, scope="docs.write")
+    response = post_ps_token(transport, session, PS_URL, resource_token, dataflow=DATAFLOW_WRITE)
 
     assert response.status_code == 403
     assert response.json()["error"] == "denied"
     ps = ps_app.extensions["aauth_ps"]
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") not in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) not in ps["consents"]
 
 
 def test_clarification_flow_resolves_after_agent_response(world):
@@ -366,7 +378,7 @@ def test_clarification_flow_resolves_after_agent_response(world):
     ps_app = create_ps(ps_url, transport=transport, policy=lambda a, r: "clarification")
     transport.add(ps_url, ps_app)
     session = AgentSession.enroll(AP_URL, "clarifier", transport, ps=ps_url)
-    resource_token = get_resource_token(transport, session, RESOURCE_URL, "docs.read")
+    resource_token = get_resource_token(transport, session, RESOURCE_URL, DATAFLOW)
 
     response = post_ps_token(transport, session, ps_url, resource_token)
     assert response.status_code == 202
@@ -384,20 +396,20 @@ def test_clarification_flow_resolves_after_agent_response(world):
     result = transport.request("GET", f"{ps_url}/pending/{pid}")
     assert result.status_code == 200
     _, claims = peek_jwt(result.json()["auth_token"])
-    assert claims["scope"] == "docs.read"
+    assert claims["dataflow"] == DATAFLOW
     assert ps_app.extensions["aauth_ps"]["agent_bindings"][session.agent_id] == "user-alice"
 
 
 def test_resource_initiated_interaction_must_be_completed(world):
     transport, _ = world
-    config = make_resource(INTERACTION_URL, transport, scope="docs.read")
+    config = make_resource(INTERACTION_URL, transport, dataflow=DATAFLOW)
     session = AgentSession.enroll(AP_URL, "interaction", transport, ps=PS_URL)
     resource_token = issue_resource_token(
         issuer=INTERACTION_URL,
         aud=PS_URL,
         agent=session.agent_id,
         agent_jkt=session.key.thumbprint,
-        scope="docs.read",
+        dataflow=DATAFLOW,
         interaction={"url": f"{INTERACTION_URL}/confirm", "label": "Confirm document access"},
         key=config.key,
     )
@@ -416,7 +428,7 @@ def test_resource_initiated_interaction_must_be_completed(world):
     assert result.status_code == 200
     _, claims = peek_jwt(result.json()["auth_token"])
     assert claims["aud"] == INTERACTION_URL
-    assert claims["scope"] == "docs.read"
+    assert claims["dataflow"] == DATAFLOW
 
     second = post_ps_token(transport, session, PS_URL, resource_token)
     assert second.status_code == 202
@@ -426,7 +438,7 @@ def test_resource_initiated_interaction_must_be_completed(world):
 
 def test_directed_sub_differs_across_resources(world, session):
     transport, _ = world
-    make_resource(DOCS_URL, transport, scope="docs.read")
+    make_resource(DOCS_URL, transport, dataflow=DATAFLOW)
     sub_a = session.get(f"{RESOURCE_URL}/api/data").json()["sub"]
     sub_b = session.get(f"{DOCS_URL}/api/data").json()["sub"]
     assert sub_a != sub_b  # pairwise pseudonymous (§15.1)
@@ -439,7 +451,7 @@ def test_expired_cached_auth_token_recovers(world, session):
     ps = ps_app.extensions["aauth_ps"]
     expired = issue_auth_token(
         issuer=PS_URL, dwk="aauth-person.json", aud=RESOURCE_URL, agent=session.agent_id,
-        cnf_jwk=session.key.public_jwk, sub="u_x", scope="docs.read", key=ps["key"],
+        cnf_jwk=session.key.public_jwk, sub="u_x", dataflow=DATAFLOW, key=ps["key"],
         now=lambda: 1000.0,
     )
     session._auth_tokens[RESOURCE_URL] = expired
@@ -447,15 +459,15 @@ def test_expired_cached_auth_token_recovers(world, session):
     assert response.status_code == 200
 
 
-def test_narrow_cached_auth_token_recovers_for_new_scope(world, session):
+def test_narrow_cached_auth_token_recovers_for_new_dataflow(world, session):
     transport, _ = world
-    multi_url = "http://multi-scope.local"
-    make_multi_scope_resource(multi_url, transport)
+    multi_url = "http://multi-dataflow.local"
+    make_multi_dataflow_resource(multi_url, transport)
 
     read = session.get(f"{multi_url}/api/read")
     assert read.status_code == 200
-    assert read.json()["scope"] == "docs.read"
+    assert read.json()["dataflow"] == DATAFLOW
 
     write = session.get(f"{multi_url}/api/write")
     assert write.status_code == 200
-    assert write.json()["scope"] == "docs.write"
+    assert write.json()["dataflow"] == DATAFLOW_WRITE

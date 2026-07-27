@@ -1,7 +1,7 @@
 """Person Server: exchanges resource tokens for auth tokens (§7.1, §9.3).
 
 Three-party (resource token aud == this PS): the PS asserts identity —
-directed sub per resource (§15.1) — and consent for the requested scope.
+directed sub per resource (§15.1) — and consent for the requested dataflow.
 Four-party (aud == an AS): the PS federates, calling the AS token endpoint
 signed with the jwks_uri scheme (§9.1.1), and relays the auth token.
 
@@ -41,8 +41,6 @@ class GrantContext(TypedDict, total=False):
     agent_claims: dict
     subagent_claims: dict | None
     agent_token: str
-    requested_scope: str | None
-    requested_dataflow: dict | None
     clarification_rounds: int
     clarification_response: str
     upstream_claims: dict | None
@@ -167,8 +165,6 @@ def create_ps(
             "agent_claims": agent_claims,
             "subagent_claims": subagent_claims,
             "agent_token": presented_token,
-            "requested_scope": body.get("scope"),
-            "requested_dataflow": body.get("dataflow"),
             "clarification_rounds": 0,
             "upstream_claims": upstream_claims,
             "act_agent": act_agent,
@@ -216,11 +212,8 @@ def create_ps(
         return rt_claims
 
     def _check_dataflow_request(rt_claims: dict, body: dict) -> None:
-        """A dataflow-scoped resource token doesn't accept a separate scope request."""
         if rt_claims.get("dataflow") is None:
-            return
-        if body.get("scope") is not None:
-            raise AAuthError(INVALID_REQUEST, 400, "scope is not allowed when resource token has dataflow")
+            raise AAuthError(INVALID_TOKEN, 400, "resource token missing dataflow")
         requested_df = body.get("dataflow")
         if requested_df is not None and requested_df != rt_claims["dataflow"]:
             raise AAuthError(DENIED, 403, "requested dataflow does not match resource token")
@@ -280,10 +273,7 @@ def create_ps(
     def _consent_key(context: GrantContext) -> tuple[str, str, str, str]:
         rt_claims = context["rt_claims"]
         agent_claims = context.get("subagent_claims") or context["agent_claims"]
-        if rt_claims.get("dataflow") is not None:
-            grant = _canonical_dataflow(rt_claims["dataflow"])
-        else:
-            grant = rt_claims.get("scope") or ""
+        grant = _canonical_dataflow(rt_claims["dataflow"])
         return person, agent_claims["sub"], rt_claims["iss"], grant
 
     def _canonical_dataflow(dataflow: dict) -> str:
@@ -297,32 +287,18 @@ def create_ps(
         act = {"agent": context["act_agent"]} if context.get("act_agent") else None
 
         if rt_claims["aud"] == issuer and "aauth_as" not in app.extensions:  # three-party: PS asserts identity (§7.1.4)
-            if rt_claims.get("dataflow") is not None:
-                token = issue_auth_token(
-                    issuer=issuer,
-                    dwk=DWK_PERSON,
-                    aud=resource,
-                    agent=agent_claims["sub"],
-                    cnf_jwk=agent_claims["cnf"]["jwk"],
-                    sub=directed_sub(person, resource),
-                    dataflow=_granted_dataflow(context),
-                    mission=rt_claims.get("mission"),
-                    act=act,
-                    key=key,
-                )
-            else:
-                token = issue_auth_token(
-                    issuer=issuer,
-                    dwk=DWK_PERSON,
-                    aud=resource,
-                    agent=agent_claims["sub"],
-                    cnf_jwk=agent_claims["cnf"]["jwk"],
-                    sub=directed_sub(person, resource),
-                    scope=_granted_scope(context),
-                    mission=rt_claims.get("mission"),
-                    act=act,
-                    key=key,
-                )
+            token = issue_auth_token(
+                issuer=issuer,
+                dwk=DWK_PERSON,
+                aud=resource,
+                agent=agent_claims["sub"],
+                cnf_jwk=agent_claims["cnf"]["jwk"],
+                sub=directed_sub(person, resource),
+                dataflow=rt_claims["dataflow"],
+                mission=rt_claims.get("mission"),
+                act=act,
+                key=key,
+            )
             return {"auth_token": token, "expires_in": 3600}
 
         # four-party: federate with the AS/sentinel the resource named (§9.3)
@@ -343,20 +319,6 @@ def create_ps(
         auth_token = response.json()["auth_token"]
         _check_as_token(context, as_url, resource, agent_claims, auth_token)
         return {"auth_token": auth_token, "expires_in": response.json().get("expires_in", 3600)}
-
-    def _granted_scope(context: GrantContext) -> str | None:
-        rt_scope = context["rt_claims"].get("scope")
-        requested = context.get("requested_scope")
-        if requested is None:
-            return rt_scope
-        allowed = set((rt_scope or "").split())
-        requested_set = set(requested.split())
-        if not requested_set <= allowed:
-            raise AAuthError(DENIED, 403, "requested scope exceeds resource token scope")
-        return requested
-
-    def _granted_dataflow(context: GrantContext) -> dict:
-        return context["rt_claims"]["dataflow"]
 
     def _fetch_grant_metadata(issuer: str, transport):
         """Discover token endpoint at aud: classic AS or eDocs sentinel."""
@@ -412,10 +374,7 @@ def create_ps(
             or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
         ):
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        if rt_claims.get("dataflow") is not None:
-            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
-                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
+        if claims.get("dataflow") != rt_claims["dataflow"]:
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
 
     @app.post("/permission")

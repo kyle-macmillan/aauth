@@ -1,5 +1,7 @@
 """Four-party (federated) access integration tests (§4.1.4, §9)."""
 
+import json
+
 import pytest
 from flask import Flask, g
 
@@ -29,6 +31,13 @@ AS_URL = "http://as.local"
 RESOURCE_URL = "http://resource.local"
 COLLAPSE_URL = "http://collapsed.local"
 
+DATAFLOW = {"data": "docs", "function": "read"}
+DATAFLOW_WRITE = {"data": "docs", "function": "write"}
+
+
+def consent_grant(df=DATAFLOW):
+    return json.dumps(df, sort_keys=True, separators=(",", ":"))
+
 
 @pytest.fixture
 def world():
@@ -37,12 +46,13 @@ def world():
     ps_app = create_ps(PS_URL, transport=transport)
     transport.add(PS_URL, ps_app)
 
-    def narrow_scope(ps_url, agent_claims, rt_claims):
-        # grant only the read part of whatever was requested
-        readable = [s for s in rt_claims.get("scope", "").split() if s.endswith(".read")]
-        return " ".join(readable) or None
+    def grant_read_dataflows(ps_url, agent_claims, rt_claims):
+        df = rt_claims.get("dataflow")
+        if df and df.get("function") == "read":
+            return df
+        return None
 
-    as_app = create_as(AS_URL, transport=transport, policy=narrow_scope)
+    as_app = create_as(AS_URL, transport=transport, policy=grant_read_dataflows)
     transport.add(AS_URL, as_app)
 
     config = ResourceConfig(
@@ -53,10 +63,10 @@ def world():
     install_resource(app, config)
 
     @app.get("/api/data")
-    @require_auth_token(config, scope="docs.read")
+    @require_auth_token(config, dataflow=DATAFLOW)
     def data():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"iss": claims["iss"], "dwk": claims["dwk"], "scope": claims["scope"], "sub": claims.get("sub")}
+        return {"iss": claims["iss"], "dwk": claims["dwk"], "dataflow": claims["dataflow"], "sub": claims.get("sub")}
 
     transport.add(RESOURCE_URL, app)
     return transport, ps_app, as_app, config
@@ -80,18 +90,18 @@ def test_four_party_end_to_end(world, session):
     body = response.json()
     assert body["iss"] == AS_URL  # AS-issued
     assert body["dwk"] == "aauth-access.json"
-    assert body["scope"] == "docs.read"
+    assert body["dataflow"] == DATAFLOW
 
     cached = session._auth_tokens[RESOURCE_URL]
     _, claims = peek_jwt(cached)
-    assert "sub" not in claims  # scope-only auth token (§9.4.1 allows it)
+    assert "sub" not in claims
 
 
-def test_as_policy_narrows_scope(world, session):
-    """docs.write requested alongside docs.read; the AS strips it."""
-    session.authorize(RESOURCE_URL, "docs.read docs.write")
-    _, claims = peek_jwt(session._auth_tokens[RESOURCE_URL])
-    assert claims["scope"] == "docs.read"
+def test_as_policy_denies_write_dataflow(world, session):
+    """Write dataflow requested; the AS denies it."""
+    with pytest.raises(AAuthError) as err:
+        session.authorize(RESOURCE_URL, DATAFLOW_WRITE)
+    assert err.value.code == "denied"
 
 
 def test_as_rejects_agent_callers(world, session):
@@ -112,7 +122,7 @@ def test_as_rejects_wrong_aud_resource_token(world, session):
     ps = ps_app.extensions["aauth_ps"]
     rt = issue_resource_token(  # aud is the PS, not the AS
         issuer=RESOURCE_URL, aud=PS_URL, agent=session.agent_id,
-        agent_jkt=session.key.thumbprint, scope="docs.read", key=config.key,
+        agent_jkt=session.key.thumbprint, dataflow=DATAFLOW, key=config.key,
     )
     req = HttpRequest("POST", f"{AS_URL}/token", {})
     sign_server(req, ps["key"], PS_URL, "aauth-person.json")
@@ -173,7 +183,7 @@ def test_as_interaction_required_flow():
     assert session.get(f"{RESOURCE_URL}/api/data").status_code == 200
     ps = ps_app.extensions["aauth_ps"]
     assert ps["agent_bindings"][session.agent_id] == "user-alice"
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) in ps["consents"]
 
 
 def test_as_approval_required_flow():
@@ -202,7 +212,7 @@ def test_as_approval_required_flow():
     assert session.get(f"{RESOURCE_URL}/api/data").status_code == 200
     ps = ps_app.extensions["aauth_ps"]
     assert ps["agent_bindings"][session.agent_id] == "user-alice"
-    assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") in ps["consents"]
+    assert ("user-alice", session.agent_id, RESOURCE_URL, consent_grant()) in ps["consents"]
 
 
 def test_as_payment_stub_surfaces_402():
@@ -221,7 +231,7 @@ def test_as_payment_stub_surfaces_402():
     session = AgentSession.enroll(AP_URL, "payment", transport, ps=PS_URL)
 
     with pytest.raises(AAuthError) as err:
-        session.authorize(RESOURCE_URL, "docs.read")
+        session.authorize(RESOURCE_URL, DATAFLOW)
 
     assert err.value.status == 402
     assert err.value.code == "payment_required"
@@ -249,10 +259,10 @@ def test_ps_as_collapse_end_to_end():
     install_resource(resource, config)
 
     @resource.get("/api/data")
-    @require_auth_token(config, scope="docs.read")
+    @require_auth_token(config, dataflow=DATAFLOW)
     def data():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"iss": claims["iss"], "dwk": claims["dwk"], "scope": claims["scope"]}
+        return {"iss": claims["iss"], "dwk": claims["dwk"], "dataflow": claims["dataflow"]}
 
     transport.add(RESOURCE_URL, resource)
     session = AgentSession.enroll(AP_URL, "collapsed", transport, ps=COLLAPSE_URL)
@@ -273,9 +283,9 @@ def _four_party_resource(transport: LoopbackTransport):
     install_resource(app, config)
 
     @app.get("/api/data")
-    @require_auth_token(config, scope="docs.read")
+    @require_auth_token(config, dataflow=DATAFLOW)
     def data():
         claims = peek_jwt(g.aauth.token)[1]
-        return {"iss": claims["iss"], "dwk": claims["dwk"], "scope": claims["scope"], "sub": claims.get("sub")}
+        return {"iss": claims["iss"], "dwk": claims["dwk"], "dataflow": claims["dataflow"], "sub": claims.get("sub")}
 
     return config, app

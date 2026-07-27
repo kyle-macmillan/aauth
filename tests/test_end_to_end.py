@@ -28,6 +28,7 @@ from aauth_edocs import (
 )
 
 AP, PS, RESOURCE = "https://ap.example", "https://ps.example", "https://resource.example"
+DATAFLOW = {"data": "data", "function": "read"}
 
 
 def test_three_party_flow_composes():
@@ -70,7 +71,7 @@ def test_three_party_flow_composes():
         aud=seen.claims["ps"],
         agent=seen.claims["sub"],
         agent_jkt=agent_key.thumbprint,
-        scope="data.read",
+        dataflow=DATAFLOW,
         mission=incoming_mission.to_claim(),
         key=resource_key,
     )
@@ -92,7 +93,7 @@ def test_three_party_flow_composes():
         agent=ps_view["agent"],
         cnf_jwk=agent_key.public_jwk,
         sub="user-alice",
-        scope=ps_view["scope"],
+        dataflow=ps_view["dataflow"],
         mission=ps_view["mission"],
         key=ps_key,
     )
@@ -104,5 +105,5 @@ def test_three_party_flow_composes():
     assert presented.header["typ"] == "aa-auth+jwt"
     claims = verify_auth_token(presented.token, resolver, aud=RESOURCE, signing_jwk=agent_key.public_jwk)
     assert claims["sub"] == "user-alice"
-    assert claims["scope"] == "data.read"
+    assert claims["dataflow"] == DATAFLOW
     assert claims["mission"]["s256"] == s256  # mission context survived the whole chain

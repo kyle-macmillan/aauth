@@ -24,6 +24,8 @@ PS_URL = "http://ps.local"
 RESOURCE_URL = "http://resource.local"
 DOWNSTREAM_URL = "http://downstream.local"
 
+DATAFLOW = {"data": "docs", "function": "read"}
+
 
 @pytest.fixture
 def world():
@@ -54,13 +56,13 @@ def install_test_resource(transport: LoopbackTransport, url: str, key: SigningKe
     return config
 
 
-def resource_token(config: ResourceConfig, agent: str, agent_jkt: str, scope: str = "docs.read") -> str:
+def resource_token(config: ResourceConfig, agent: str, agent_jkt: str, dataflow: dict = DATAFLOW) -> str:
     return issue_resource_token(
         issuer=config.issuer,
         aud=PS_URL,
         agent=agent,
         agent_jkt=agent_jkt,
-        scope=scope,
+        dataflow=dataflow,
         key=config.key,
     )
 
@@ -123,7 +125,7 @@ def test_call_chaining_sets_act_agent(world, parent):
         agent=parent.agent_id,
         cnf_jwk=parent.key.public_jwk,
         sub="u_chain",
-        scope="docs.read",
+        dataflow=DATAFLOW,
         key=ps_app.extensions["aauth_ps"]["key"],
     )
     rt = resource_token(downstream, parent.agent_id, parent.key.thumbprint)
@@ -144,7 +146,7 @@ def test_bad_upstream_token_audience_rejected(world, parent):
         agent=parent.agent_id,
         cnf_jwk=parent.key.public_jwk,
         sub="u_chain",
-        scope="docs.read",
+        dataflow=DATAFLOW,
         key=ps_app.extensions["aauth_ps"]["key"],
     )
     rt = resource_token(downstream, parent.agent_id, parent.key.thumbprint)

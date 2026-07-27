@@ -171,36 +171,21 @@ def create_sentinel(
             or jwk_thumbprint(claims["cnf"]["jwk"]) != jwk_thumbprint(agent_claims["cnf"]["jwk"])
         ):
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        if rt_claims.get("dataflow") is not None:
-            if claims.get("dataflow") != rt_claims["dataflow"] or "scope" in claims:
-                raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
-        elif not set((claims.get("scope") or "").split()) <= set((rt_claims.get("scope") or "").split()):
+        if claims.get("dataflow") != rt_claims["dataflow"]:
             raise AAuthError(SERVER_ERROR, 502, "AS returned a token that does not match the request")
 
     def _issue(agent_claims: dict, rt_claims: dict, as_token: str) -> dict:
         _, as_claims = peek_jwt(as_token)
-        if rt_claims.get("dataflow") is not None:
-            token = issue_auth_token(
-                issuer=issuer,
-                dwk=DWK_SENTINEL,
-                aud=rt_claims["iss"],
-                agent=agent_claims["sub"],
-                cnf_jwk=agent_claims["cnf"]["jwk"],
-                dataflow=as_claims["dataflow"],
-                mission=rt_claims.get("mission"),
-                key=key,
-            )
-        else:
-            token = issue_auth_token(
-                issuer=issuer,
-                dwk=DWK_SENTINEL,
-                aud=rt_claims["iss"],
-                agent=agent_claims["sub"],
-                cnf_jwk=agent_claims["cnf"]["jwk"],
-                scope=as_claims.get("scope"),
-                mission=rt_claims.get("mission"),
-                key=key,
-            )
+        token = issue_auth_token(
+            issuer=issuer,
+            dwk=DWK_SENTINEL,
+            aud=rt_claims["iss"],
+            agent=agent_claims["sub"],
+            cnf_jwk=agent_claims["cnf"]["jwk"],
+            dataflow=as_claims["dataflow"],
+            mission=rt_claims.get("mission"),
+            key=key,
+        )
         return {"auth_token": token, "expires_in": 3600}
 
     return app

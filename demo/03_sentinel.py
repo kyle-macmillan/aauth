@@ -42,6 +42,8 @@ PS_URL = "http://127.0.0.1:5003"
 AS_URL = "http://127.0.0.1:5004"
 SENTINEL_URL = "http://127.0.0.1:5005"
 
+DATAFLOW = {"data": "docs", "function": "read"}
+
 PARTY_NAMES = {
     AP_URL: "AP",
     RESOURCE_URL: "Resource",
@@ -75,19 +77,18 @@ def make_resource() -> Flask:
         key_resolver=JwksResolver(transport),
         as_url=SENTINEL_URL,  # grant audience: resource token aud is the sentinel
         controller_url=AS_URL,  # controller AS the sentinel forwards to
-        default_scope="docs.read",
     )
     app = Flask(__name__)
     install_resource(app, config)
 
     @app.get("/api/data")
-    @require_auth_token(config, scope="docs.read")
+    @require_auth_token(config, dataflow=DATAFLOW)
     def data():
         claims = peek_jwt(g.aauth.token)[1]
         return {
             "iss": claims["iss"],
             "dwk": claims["dwk"],
-            "scope": claims["scope"],
+            "dataflow": claims["dataflow"],
             "sub": claims.get("sub"),
         }
 
@@ -95,9 +96,11 @@ def make_resource() -> Flask:
 
 
 def as_policy(ps_url, agent_claims, rt_claims):
-    """Grant only *.read scopes from whatever the resource token requested."""
-    readable = [s for s in rt_claims.get("scope", "").split() if s.endswith(".read")]
-    return " ".join(readable) or None
+    """Grant read dataflows; deny anything else."""
+    df = rt_claims.get("dataflow")
+    if df and df.get("function") == "read":
+        return df
+    return None
 
 
 def checkpoint(app: Flask, label: str) -> Flask:
@@ -186,14 +189,14 @@ def main() -> None:
     print(f"   enrolled as {agent.agent_id}\n")
 
     print("3) create auth token (resource /authorize -> PS -> sentinel -> AS):")
-    auth_token = agent.authorize(RESOURCE_URL, "docs.read")
+    auth_token = agent.authorize(RESOURCE_URL, DATAFLOW)
     _, claims = peek_jwt(auth_token)
-    print(f"   (agent) got auth token iss={claims['iss']} aud={claims['aud']} scope={claims['scope']}")
+    print(f"   (agent) got auth token iss={claims['iss']} aud={claims['aud']} dataflow={claims['dataflow']}")
     print(f"   (agent) sub present? {'sub' in claims}\n")
     assert claims["iss"] == SENTINEL_URL
     assert claims["aud"] == RESOURCE_URL
-    assert claims["scope"] == "docs.read"
-    assert "sub" not in claims  # scope-only auth token (§9.4.1)
+    assert claims["dataflow"] == DATAFLOW
+    assert "sub" not in claims
 
     print("4) present auth token to resource:")
     r = agent.get(f"{RESOURCE_URL}/api/data")
@@ -202,7 +205,7 @@ def main() -> None:
     body = r.json()
     assert body["iss"] == SENTINEL_URL
     assert body["dwk"] == "aauth-sentinel.json"
-    assert body["scope"] == "docs.read"
+    assert body["dataflow"] == DATAFLOW
     assert body["sub"] is None
 
     print("demo complete: four-party federation via PS -> sentinel -> AS over real HTTP")

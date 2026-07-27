@@ -1,8 +1,7 @@
 """Four-party dataflow demo over real localhost HTTP.
 
 Same topology as demo/03_sentinel.py (AP, Resource, PS, AS, Sentinel), but
-the grant is a dataflow claim rather than a scope — mutually exclusive per
-the token model.
+the grant is a dataflow claim.
 
   1. unsigned request  -> 401 + requirement=agent-token
   2. enroll agent bound to the PS
@@ -90,7 +89,6 @@ def make_resource() -> Flask:
             "iss": claims["iss"],
             "dwk": claims["dwk"],
             "dataflow": claims.get("dataflow"),
-            "scope": claims.get("scope"),
             "sub": claims.get("sub"),
         }
 
@@ -189,14 +187,13 @@ def main() -> None:
     print(f"   enrolled as {agent.agent_id}\n")
 
     print("3) create auth token (resource /authorize -> PS -> sentinel -> AS):")
-    auth_token = agent.authorize(RESOURCE_URL, dataflow=DATAFLOW)
+    auth_token = agent.authorize(RESOURCE_URL, DATAFLOW)
     _, claims = peek_jwt(auth_token)
     print(f"   (agent) got auth token iss={claims['iss']} aud={claims['aud']} dataflow={claims['dataflow']}")
-    print(f"   (agent) scope present? {'scope' in claims}; sub present? {'sub' in claims}\n")
+    print(f"   (agent) sub present? {'sub' in claims}\n")
     assert claims["iss"] == SENTINEL_URL
     assert claims["aud"] == RESOURCE_URL
     assert claims["dataflow"] == DATAFLOW
-    assert "scope" not in claims
     assert "sub" not in claims
 
     print("4) present auth token to resource:")
@@ -207,7 +204,6 @@ def main() -> None:
     assert body["iss"] == SENTINEL_URL
     assert body["dwk"] == "aauth-sentinel.json"
     assert body["dataflow"] == DATAFLOW
-    assert body["scope"] is None
     assert body["sub"] is None
 
     print("demo complete: four-party dataflow grant via PS -> sentinel -> AS over real HTTP")
