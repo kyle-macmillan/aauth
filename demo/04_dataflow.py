@@ -160,7 +160,7 @@ def main() -> None:
     as_app = create_as(AS_URL)
     as_app.extensions["aauth_as"]["create_rule"](
         source_agent_id="*",
-        function_id="read",
+        function_id="avg_bp",
         de_id="*",
         dest_agent_id="*",
     )

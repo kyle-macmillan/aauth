@@ -71,6 +71,8 @@ def check_policy_rule(policies: list[PolicyRule], requested: PolicyRule) -> bool
     Registered rule fields set to `"*"` are wildcards and match any request
     value for that field.
     """
+    print(f"policies: {policies}")
+    print(f"requested: {requested}")
     if not policies:
         return True
     for rule in policies:
