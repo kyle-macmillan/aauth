@@ -3,8 +3,10 @@ internal eDocs experimentation. See IMPLEMENTATION_PLAN.md for scope and
 the simplifications relative to the spec."""
 
 from .controller import ControllerPolicy, issue_controller_decision
+from .coordinator import ApprovalRequired, AuthorizationCoordinator, resource_origin
 from .deferred import PendingStore, poll
 from .edocs import Dataflow, ExactRule, FunctionDescriptor, ResourceBinding, SentinelRegistry
+from .edocs_consent import EdocsApprovalHandler, EdocsApprovalRequest, EdocsConsentClient
 from .errors import AAuthError
 from .headers import (
     ACCESS_HEADER,

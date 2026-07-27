@@ -192,7 +192,11 @@ def create_ps(
             return body
         # pending: user consent needed (§12.3.4 approval — no user URL to visit,
         # the decision arrives via the /consent endpoint)
-        pid = store.create(requirement=build_requirement(APPROVAL), retry_after=0)
+        pid = store.create(retry_after=0)
+        store.set_requirement(
+            pid,
+            build_requirement(APPROVAL, url=f"{issuer}/consent/{pid}"),
+        )
         pending_requests[pid] = context
         status, headers, response_body = store.response(pid)
         return response_body, status, headers
@@ -212,7 +216,11 @@ def create_ps(
         if decision == "grant":
             return {"permission": "granted"}
         if decision == "pending":
-            pid = store.create(requirement=build_requirement(APPROVAL), retry_after=0)
+            pid = store.create(retry_after=0)
+            store.set_requirement(
+                pid,
+                build_requirement(APPROVAL, url=f"{issuer}/consent/{pid}"),
+            )
             pending_requests[pid] = {
                 "kind": "permission",
                 "agent_claims": verified.claims,
@@ -457,6 +465,8 @@ def create_ps(
 
         if requirement in (INTERACTION, APPROVAL):
             pid = store.create(retry_after=0)
+            if requirement == APPROVAL:
+                params = {**params, "url": f"{issuer}/consent/{pid}"}
             store.set_requirement(pid, build_requirement(requirement, **params))
             relay_context = {**context, "as_pending_url": as_pending_url}
             if requirement == INTERACTION:
