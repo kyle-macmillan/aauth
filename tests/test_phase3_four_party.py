@@ -203,6 +203,51 @@ def test_as_approval_required_flow():
     assert ("user-alice", session.agent_id, RESOURCE_URL, "docs.read") in ps["consents"]
 
 
+def test_downstream_denial_is_delivered_through_agent_polling():
+    transport = LoopbackTransport()
+    transport.add(AP_URL, create_ap(AP_URL))
+    ps_app = create_ps(
+        PS_URL,
+        transport=transport,
+        policy=lambda _agent, _resource: "pending",
+    )
+    transport.add(PS_URL, ps_app)
+    transport.add(
+        AS_URL,
+        create_as(
+            AS_URL,
+            transport=transport,
+            policy=lambda _ps, _agent, _resource: None,
+        ),
+    )
+    _, resource_app = _four_party_resource(transport)
+    transport.add(RESOURCE_URL, resource_app)
+    session = AgentSession.enroll(AP_URL, "downstream-denial", transport, ps=PS_URL)
+    consent_responses = []
+
+    def approve(location, _headers):
+        login_person(transport, PS_URL)
+        pid = location.rsplit("/", 1)[-1]
+        consent_responses.append(
+            transport.request(
+                "POST",
+                f"{PS_URL}/consent/{pid}",
+                json={"decision": "grant"},
+            )
+        )
+
+    session.on_pending = approve
+
+    with pytest.raises(AAuthError) as caught:
+        session.get(f"{RESOURCE_URL}/api/data")
+
+    assert consent_responses[0].status_code == 200
+    assert consent_responses[0].json() == {"status": "recorded"}
+    assert caught.value.status == 403
+    assert caught.value.code == "denied"
+    assert caught.value.detail == "resource policy denied the request"
+
+
 def test_as_payment_stub_surfaces_402():
     transport = LoopbackTransport()
     transport.add(AP_URL, create_ap(AP_URL))

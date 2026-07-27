@@ -271,16 +271,24 @@ def create_ps(
             raise AAuthError(INVALID_REQUEST, 404, "no such pending consent")
         decision = (request.get_json(force=True) or {}).get("decision")
         if decision == "grant":
-            if context.get("kind") == "permission":
-                store.resolve(pid, {"permission": "granted"})
-                return {"status": "recorded"}
-            if context.get("as_pending_url"):
-                _complete_as_pending(pid, context)
-                return {"status": "recorded"}
-            _check_binding(context)
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
+            try:
+                if context.get("kind") == "permission":
+                    store.resolve(pid, {"permission": "granted"})
+                    return {"status": "recorded"}
+                if context.get("as_pending_url"):
+                    _complete_as_pending(pid, context)
+                    return {"status": "recorded"}
+                _check_binding(context)
+                result = _issue(context)
+                _remember_grant(context)
+                store.resolve(pid, result)
+            except AAuthError as error:
+                store.deny(
+                    pid,
+                    error=error.code,
+                    status=error.status,
+                    detail=error.detail,
+                )
         else:
             store.deny(pid, detail="the user declined the request")
         return {"status": "recorded"}
@@ -294,12 +302,20 @@ def create_ps(
             raise AAuthError(INVALID_REQUEST, 404, "no such pending interaction")
         decision = (request.get_json(force=True) or {}).get("decision")
         if decision == "grant":
-            if context.get("as_pending_url"):
-                _complete_as_pending(pid, context)
-                return {"status": "recorded"}
-            result = _issue(context)
-            _remember_grant(context)
-            store.resolve(pid, result)
+            try:
+                if context.get("as_pending_url"):
+                    _complete_as_pending(pid, context)
+                    return {"status": "recorded"}
+                result = _issue(context)
+                _remember_grant(context)
+                store.resolve(pid, result)
+            except AAuthError as error:
+                store.deny(
+                    pid,
+                    error=error.code,
+                    status=error.status,
+                    detail=error.detail,
+                )
         else:
             store.deny(pid, detail="resource interaction denied")
         return {"status": "recorded"}
