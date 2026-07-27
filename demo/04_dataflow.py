@@ -157,7 +157,14 @@ def main() -> None:
     serve(create_ap(AP_URL), 5001)
     serve(make_resource(), 5002)
     serve(checkpoint(create_ps(PS_URL), "PS"), 5003)
-    serve(checkpoint(create_as(AS_URL), "AS"), 5004)
+    as_app = create_as(AS_URL)
+    as_app.extensions["aauth_as"]["create_rule"](
+        source_agent_id="*",
+        function_id="read",
+        de_id="*",
+        dest_agent_id="*",
+    )
+    serve(checkpoint(as_app, "AS"), 5004)
     serve(checkpoint(create_sentinel(SENTINEL_URL), "sentinel"), 5005)
 
     wait_for(f"{AP_URL}/.well-known/aauth-agent.json")

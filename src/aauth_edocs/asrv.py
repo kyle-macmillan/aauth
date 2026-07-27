@@ -102,7 +102,6 @@ def request_rule(agent_claims: dict, rt_claims: dict) -> PolicyRule:
 def create_as(
     issuer: str,
     key: SigningKey | None = None,
-    policy: Policy | None = None,
     transport=None,
     app: Flask | None = None,
     token_path: str = "/token",
@@ -227,14 +226,11 @@ def create_as(
 
         context = {"ps_url": ps_url, "agent_claims": agent_claims, "rt_claims": rt_claims}
         default_grant = rt_claims["dataflow"]
-        if policy is not None:
-            granted = policy(ps_url, agent_claims, rt_claims)
-        else:
-            granted = (
-                default_grant
-                if check_policy_rule(policies, request_rule(agent_claims, rt_claims))
-                else None
-            )
+        granted = (
+            default_grant
+            if check_policy_rule(policies, request_rule(agent_claims, rt_claims))
+            else None
+        )
         if granted is None:
             raise AAuthError("denied", 403, "resource policy denied the request")
         if isinstance(granted, dict) and "requirement" in granted:
