@@ -5,12 +5,13 @@ authorization flow. It replaces the original base-AAuth implementation plan,
 which no longer described the current code or intended architecture.
 
 Target for the first vertical slice: the Wednesday demo described below.
-Traditional AAuth remains on `aauth/main`; all eDocs extension work belongs on
-`aauth/edocs-demo` and `mcp-aauth/edocs-demo`.
+Traditional AAuth remains on `aauth/main`; reusable eDocs extension work
+belongs on `aauth/edocs-demo` and `mcp-aauth/edocs-demo`, while Codex-specific
+composition and UI behavior belongs in `mcp-aauth-codex`.
 
-**Last handoff update:** 2026-07-27. The original vertical slice now works
-through a real MCP SDK tool call. Section 12 records the completed work and
-Section 13 is the current resume point.
+**Last handoff update:** 2026-07-27. The original vertical slice and the real
+Codex-hosted flow now work end to end. Section 12 records the completed work,
+and Section 13 is the current resume point.
 
 ## 1. Current repository state
 
@@ -23,24 +24,22 @@ Section 13 is the current resume point.
 - Relevant files:
   - `src/mcp/server/lowlevel/server.py`
   - `src/mcp/server/mcpserver/server.py`
-- The current working tree has an unrelated local `uv.lock` modification.
-  Preserve it unless its owner explicitly asks otherwise.
+- The working tree is clean.
 
 ### `aauth`
 
 - Extension branch: `edocs-demo`.
-- Current commit: `5acabda`.
-- Remote `origin/edocs-demo`: `5b434e7`; the local branch is two commits
-  ahead and has not been pushed.
+- Current commit: `601ec4c` (pushed).
 - The branch now includes the core models and claims, conditional controller
   tokens, exact controller policy decisions, unanimous Sentinel aggregation,
   optional eDocs behavior in the existing AS, the Sentinel HTTP flow, generic
   downstream-denial relay through pending polling, and authenticated consent
   review.
-- Latest complete test result: **182 passed, 1 skipped**.
-- Session commits after the pulled Sentinel implementation:
+- Session commits after the pulled Sentinel implementation include:
   - `4c591fc fix: relay downstream denials through polling`
   - `5acabda feat: expose verified pending consent details`
+  - `50bb3cb docs: update eDocs demo implementation handoff`
+  - `601ec4c feat: coordinate deferred eDocs consent`
 - Relevant implementation files:
   - `src/aauth_edocs/edocs.py` — eDocs dataflow/domain models
   - `src/aauth_edocs/tokens.py` — normal, resource, and conditional claims
@@ -48,6 +47,9 @@ Section 13 is the current resume point.
   - `src/aauth_edocs/sentinel.py` — Sentinel HTTP flow and aggregation
   - `src/aauth_edocs/ps.py` — generic PS approval, review, relay, and polling
   - `src/aauth_edocs/agent.py` — existing generic synchronous agent flow
+  - `src/aauth_edocs/coordinator.py` — reusable deferred authorization
+    coordinator
+  - `src/aauth_edocs/edocs_consent.py` — trusted host consent review/decision
 - Relevant tests:
   - `tests/test_sentinel.py`
   - `tests/test_sentinel_http.py`
@@ -62,12 +64,7 @@ Section 13 is the current resume point.
 ### `mcp-aauth`
 
 - Branch: `edocs-demo`
-- Current commit: `4d980ca`.
-- Remote `origin/edocs-demo`: `41470ee`; the local branch is six commits
-  ahead and has not been pushed.
-- Generated `src/mcp_aauth/__pycache__/` and `tests/__pycache__/` directories
-  are untracked and must not be committed.
-- Latest complete test result: **62 passed**.
+- Current commit: `a59a9da` (pushed).
 - Session commits:
   - `c4d8496 feat: add eDocs MCP authorization flow`
   - `b6feaa5 feat: request eDocs resource tokens over signed HTTP`
@@ -75,6 +72,7 @@ Section 13 is the current resume point.
   - `6103fad test: receive Sentinel denial through polling`
   - `85b1f2e test: harden eDocs MCP authorization boundary`
   - `4d980ca test: review verified eDocs consent claims`
+  - `a59a9da feat: coordinate AAuth challenges in MCP clients`
 - Implemented:
   - ASGI-to-AAuth request conversion preserving the signed request target
     and HTTP headers;
@@ -96,14 +94,21 @@ Section 13 is the current resume point.
   eDocs-specific resource state and `identity@1` are deliberately test-local
   in `tests/test_edocs_end_to_end.py`.
 
-### Other workspace repositories
+### `mcp-aauth-codex`
 
-- `eDocs-research/main` was pulled to `6733a49`. The relevant new memo is
-  `memos/aauth-update-6-21/memo.tex`; it selects representative agents and
-  provider-side computation for this project.
-- `eDocs-system/kyle/rules` contains a large local Iceberg/Delta Sharing
-  implementation, but Iceberg work is explicitly out of scope for this
-  AAuth/MCP demo and must not be mixed into the current branches.
+- Branch: `main`.
+- Current commit: `6d0b980` (pushed to
+  `kyle-macmillan/mcp-aauth-codex`).
+- Provides the Codex-specific stdio MCP proxy, trusted elicitation UI bridge,
+  runnable localhost composition, and end-to-end process tests.
+- Uses the adjacent `aauth`, `mcp-aauth`, and forked MCP SDK repositories
+  without adding Codex-specific behavior to those packages.
+- The live demo composes an Agent Provider, Person Server, Sentinel, two
+  controller ASes, and one eDocs MCP resource. Asking Codex to invoke
+  `identity@1` on `doc-123` now completes the real approval and authorization
+  flow.
+- The next milestone is specified in
+  `mcp-aauth-codex/INTERFACES_PLAN.md` from the workspace root.
 
 ## 2. Architecture and trust boundaries
 
@@ -521,10 +526,27 @@ Specific completed behavior:
   conditional, wrong-proof-key, wrong-eDoc, wrong-function, wrong-source, and
   wrong-destination requests all fail with zero successful function
   executions.
+- Added the reusable `AuthorizationCoordinator` in `aauth`. It owns the
+  resource-token exchange, opaque pending polling, and resource-scoped final
+  token cache without interpreting MCP or eDocs semantics.
+- Added the generic `mcp-aauth` client coordination hook. It recognizes AAuth
+  resource challenges, pauses for a trusted approval callback, completes
+  pending authorization, and retries with the final token.
+- Created and pushed the standalone `mcp-aauth-codex` repository. Its stdio
+  proxy adapts Codex to the Streamable HTTP resource without modifying Codex
+  or adding Codex behavior to the generic packages.
+- Added a Codex elicitation that renders only Person Server-verified eDocs
+  facts and submits the person's decision directly to the PS. The prompt
+  occurs after the resource token exists and before the PS forwards the
+  request to the Sentinel.
+- Kept Codex's strict elicitation-schema compatibility adjustment local to
+  `mcp-aauth-codex`.
+- Added a runnable localhost composition and process tests using the forked
+  MCP SDK's public custom-authentication hook. The real Codex demo now
+  completes `identity@1` on `doc-123`.
 
 Important decisions made during this session:
 
-- Do not build the Iceberg/Delta Sharing implementation in this phase.
 - Do not add a standalone PS HTML page yet. The intended user experience is a
   person working with a conversational agent; the host should render a
   trusted structured approval prompt analogous to Codex command approvals.
@@ -536,79 +558,84 @@ Important decisions made during this session:
 - Resource/application code owns executable function implementations. The
   eDocs extension owns function identity, descriptors, dataflow semantics,
   controllers, and policy. Generic `mcp-aauth` owns neither.
+- Codex compatibility behavior belongs in `mcp-aauth-codex`, not in generic
+  `mcp-aauth` or the MCP SDK.
+- The production-facing connection remains Streamable HTTP. The stdio server
+  is only the local Codex adapter.
 
-## 13. Current resume point: generic AAuth-aware MCP clients
+## 13. Current resume point: exact invocations and operator interfaces
 
-The next milestone is client-side composition, in this order:
+The generic coordinator, MCP adapter, Codex host bridge, and runnable
+Streamable HTTP demo described by the previous resume point are complete. The
+next session must begin with the exact-argument authorization foundation in
+`mcp-aauth-codex/INTERFACES_PLAN.md`; do not begin with dashboard styling or
+multi-provider composition.
 
-### 13.1 Generic AAuth coordinator in `aauth`
+### 13.1 Exact function arguments
 
-Add a reusable coordinator alongside `src/aauth_edocs/agent.py` that is
-independent of MCP and can be shared by multiple server-specific clients. It
-should own:
+The current authorization binds `(source, function, document, destination)`.
+That is insufficient for parameterized server-side functions because a token
+for one filter or search could be reused with different arguments.
 
-- agent identity, signing key, and agent token;
-- PS identity and generic resource-token exchange;
-- pending requirements and opaque polling;
-- an approval-required event/callback for a trusted host UI;
-- resource-origin-scoped final-token caching;
-- retry inputs/results, without interpreting tool arguments or eDocs claims.
+First:
 
-The coordinator must not know about `f(D)`, eDocs, Sentinels, or controllers.
-The existing synchronous `AgentSession` is useful reference behavior but
-should not be copied blindly into an MCP-specific class.
+- canonicalize normalized JSON function arguments;
+- bind them through resource, controller, conditional, and final tokens;
+- include them in `Dataflow`, exact controller policies, consent review, and
+  final resource enforcement;
+- add function input schemas to descriptors; and
+- preserve the existing empty-argument `identity@1` behavior.
 
-### 13.2 Generic MCP adapter in `mcp-aauth`
+Run all `aauth` and `mcp-aauth` tests after this foundation. Only proceed when
+argument reordering is equivalent and any argument-value change is rejected.
 
-Build on the coordinator and the standard MCP SDK client. Each MCP server still
-has its own client/session; the reusable AAuth coordinator may be shared among
-them. The adapter should:
+### 13.2 Three provider/resource domains
 
-- sign outgoing MCP HTTP requests as the agent;
-- recognize an AAuth resource-token requirement;
-- pass the resource token to the coordinator;
-- surface a structured approval-required event to the host;
-- wait for the human decision and poll the opaque URL;
-- retry the original MCP request with the resource-scoped final auth token.
+After the foundation passes, replace the single hard-coded demo resource with
+Alice, Bob, and Carol. Each provider has:
 
-Start from `src/mcp_aauth/client.py`, which currently only signs requests with
-a supplied token. Keep `mcp-python-sdk` generic; use its existing custom
-authentication hook rather than adding AAuth code there.
+- one distinct resource owner and source agent;
+- one Streamable HTTP MCP server with a multi-file catalog;
+- one owning AS selected through the Sentinel's trusted binding; and
+- one combined resource/AS administration dashboard.
 
-### 13.3 Explicit eDocs client/host extension
+Every provider accepts CSV, Parquet, and PDF files. Catalog metadata is
+discoverable through MCP without approval; file bytes are not. Codex sees one
+aggregated provider-qualified catalog.
 
-Only after generic AAuth works, add the explicit eDocs layer. It should:
+### 13.3 Server-side functions
 
-- construct or recognize requests for a registered function over an eDoc;
-- interpret the PS-verified eDocs claim group for display;
-- render source, function, eDoc, destination, and controllers in a trusted
-  host permission prompt;
-- enforce eDocs dataflow claims at the application boundary.
+Implement and advertise:
 
-For the current demo, keep this extension on `mcp-aauth/edocs-demo` and outside
-the generic `mcp_aauth` public API (the integration test is the current
-example). If it becomes reusable, make it a distinct package such as
-`mcp-aauth-edocs`, depending on generic `mcp-aauth` and the eDocs extension in
-`aauth/edocs-demo`.
+- `select_and_filter_table_rows@1` for bounded CSV/Parquet projection and
+  filtering; and
+- `search_pdf_text@1` for bounded PDF text search.
 
-### 13.4 Intended host experience
+Use a proactive, agent-signed resource authorization request containing the
+eDoc, function, and normalized arguments. The final MCP call must execute the
+same exact invocation. Continue treating token issuance as materialization;
+execution receipts remain deferred.
 
-The target experience is Codex/Claude-like:
+### 13.4 Dashboards
 
-```text
-Person: "Analyze D in this way."
-Agent: discovers the resource and proposes f(D).
-Host: pauses and renders the PS-verified authorization request.
-Person: approves or denies in the same conversational interface.
-Agent: resumes automatically with the final token or reports the denial.
-```
+Provider dashboards manage uploads, display metadata, enablement, compatible
+functions, and exact `X`/`X | Y` dataflow policy. The Sentinel dashboard
+manages trusted provider/resource/AS bindings and function registration and
+shows mappings, authorization outcomes, and provenance.
 
-The agent must not be able to approve itself or control the trusted approval
-card as ordinary chat text. The host sends the person's decision directly to
-the PS. Native MCP approval prompts may be useful presentation surfaces, but
-standard MCP tool approval is not automatically an AAuth approval credential;
-the host integration must bind the authenticated person, exact verified
-request, pending approval ID, and decision.
+These are reset-on-launch localhost interfaces: use server-rendered pages, no
+login, no persistent database, no raw download, and no permanent deletion.
+Keep resource state in the resource service and policy state in the AS even
+though the provider dashboard presents them together.
+
+### 13.5 Repository boundary
+
+- Reusable eDocs argument and policy semantics belong in `aauth`.
+- Multi-provider composition, file execution, dashboards, and Codex
+  aggregation belong in `mcp-aauth-codex`.
+- Do not add eDocs-specific behavior to `mcp-aauth` or `mcp-python-sdk`.
+- The complete decision record, interfaces, function schemas, tests, and
+  assumptions are in `mcp-aauth-codex/INTERFACES_PLAN.md`.
 
 ## 14. Review protocol
 
