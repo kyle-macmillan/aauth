@@ -9,9 +9,9 @@ Traditional AAuth remains on `aauth/main`; reusable eDocs extension work
 belongs on `aauth/edocs-demo` and `mcp-aauth/edocs-demo`, while Codex-specific
 composition and UI behavior belongs in `mcp-aauth-codex`.
 
-**Last handoff update:** 2026-07-27. The original vertical slice and the real
-Codex-hosted flow now work end to end. Section 12 records the completed work,
-and Section 13 is the current resume point.
+**Last handoff update:** 2026-07-27. The exact-argument DuckDB vertical slice
+is implemented and tested. Section 15 is the authoritative current handoff;
+older milestone sections remain as design history.
 
 ## 1. Current repository state
 
@@ -648,3 +648,60 @@ Before making it:
 
 Continue using the same approval boundary for every subsequent code change and
 before every commit or push.
+
+## 15. Current handoff: exact invocation and DuckDB execution
+
+### Completed in this session
+
+- Function arguments are opaque normalized JSON at the AAuth boundary. AAuth
+  canonicalizes, hashes, binds, and compares them, but does not validate a
+  function schema or interpret SQL.
+- Empty arguments remain valid and have a stable digest.
+- Resource tokens retain the full argument object and its digest. Controller,
+  conditional, and final authorization tokens bind the digest. The client
+  retains and resends the original arguments, and the resource recomputes the
+  digest before execution.
+- Remembered PS consent for an eDocs invocation includes the argument digest,
+  preventing consent for one invocation from authorizing changed arguments.
+- Function schemas remain descriptive discovery/UI metadata. The resource
+  owns runtime applicability and execution; the implementation may be loaded
+  from any trusted source when its immutable descriptor/digest agrees with the
+  AS and Sentinel.
+- The demo resource resolves an opaque eDoc ID to its own DuckDB database and
+  executes `query_table@1` only after final Sentinel-backed authorization.
+  AAuth performs no SQL validation.
+- `mcp-aauth-codex/scripts/setup_demo_db.py` creates the resettable demo
+  database and catalog. Filenames are metadata, never resource identity.
+
+### Repositories and implementation commits
+
+- `aauth`, branch `edocs-demo`:
+  - `4ff9f98` binds exact function arguments across authorization tokens.
+  - `55673bc` removes schema/SQL semantics from AAuth and binds remembered
+    consent to the invocation digest.
+- `mcp-aauth`, branch `edocs-demo`:
+  - `ed734ed` covers exact argument enforcement.
+  - `12d909e` adapts the end-to-end resource test to proactive authorization.
+- `mcp-aauth-codex`, branch `main`:
+  - `5f9d97b` adds proactive authorization, opaque eDoc routing, the resource
+    function-loader boundary, DuckDB setup/execution, and integration tests.
+- `python-sdk`, branch `aauth-auth-middleware-hook`, remains unchanged and is
+  consumed from the local fork.
+- `eDocs-research` and all LaTeX-related material remain untouched.
+
+### Verification
+
+- `aauth`: 212 passed, 1 skipped.
+- `mcp-aauth`: 68 passed.
+- `mcp-aauth-codex`: 19 passed, including the real stdio proxy and live
+  resource/authorization flow.
+
+### Next session starting point
+
+Start in `mcp-aauth-codex`. Generalize the proven single-resource vertical
+slice into the Alice/Bob/Carol provider topology described in
+`INTERFACES_PLAN.md`: distinct resource/AS domains, provider-qualified
+catalog discovery, and opaque eDoc routing. Reuse `FunctionLoader`,
+`DemoResource.authorize`, and `DemoResource.execute`; do not introduce an
+AAuth-side query language or schema validator. Add dashboards only after
+multi-provider routing and isolation pass end-to-end tests.
