@@ -943,7 +943,46 @@ handling, per the explicit scope decision.
 - Shell launchers pass `bash -n`.
 - All affected repositories pass `git diff --check`.
 
-### 16.10 Deferred work
+### 16.10 Direct-input lineage in resource tokens
+
+The next policy milestone is transitive enforcement over derived eDocs. If an
+eDoc such as `g(f(D))` is governed, the resource must declare that `f(D)` is a
+direct input so the Sentinel can retain Alice's policy authority throughout
+the derived-data lineage.
+
+The agreed token boundary is:
+
+- the eDocs resource token carries a signed `input_edoc_ids` JSON list;
+- the list contains direct inputs only, not the transitive closure;
+- the Sentinel verifies the resource issuer/key binding, persists the direct
+  edges, and derives the transitive ancestry from its trusted registry;
+- later assertions for a known eDoc must not redefine its registered inputs;
+- source eDocs use an empty input list; and
+- local execution makes this a signed resource assertion, not proof that the
+  resource disclosed every input it actually used.
+
+The first TDD step is now present in `tests/test_tokens.py`. It specifies:
+
+- round-trip issuance and verification of two direct input eDoc IDs;
+- exact verification binding for `input_edoc_ids`;
+- rejection of duplicate, empty, non-string, and non-list values; and
+- omission of the claim from traditional non-eDocs resource tokens.
+
+The new eDocs tests intentionally fail because `issue_resource_token` does not
+yet accept `input_edoc_ids`; the traditional resource-token compatibility test
+passes.
+
+The next implementation slice is confined to
+`src/aauth_edocs/tokens.py`:
+
+1. Add optional `input_edoc_ids` issuance and verification parameters.
+2. Validate and encode the claim as a canonical JSON list.
+3. Include it in the complete eDocs claim group and exact binding checks.
+4. Preserve claim omission for non-eDocs AAuth tokens.
+5. Make the focused token tests pass before propagating lineage through
+   Sentinel aggregation, controller decisions, and final auth tokens.
+
+### 16.11 Deferred work
 
 - Derived eDocs are tracked by the Sentinel demo registry but are not yet
   served by a dedicated derived-resource MCP endpoint.

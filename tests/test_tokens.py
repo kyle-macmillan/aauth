@@ -65,6 +65,7 @@ def test_resource_token_roundtrip(resource_key, agent_key, agent, resolver):
     claims = verify_resource_token(rt, resolver, aud=PS, agent=agent, agent_jkt=agent_key.thumbprint)
     assert claims["scope"] == "data.read data.write"
     assert claims["mission"] == mission
+    assert "input_edoc_ids" not in claims
 
 
 def test_resource_token_wrong_aud(resource_key, agent_key, agent, resolver):
@@ -154,6 +155,7 @@ def test_alg_none_rejected(ps_key, agent_key, agent, resolver):
 EDOC_SOURCE = "aauth:source@ap.example"
 EDOC_ID = "doc-123"
 EDOC_CONTROLLERS = ("https://as-a.example", "https://as-b.example")
+EDOC_INPUTS = ("edoc://alice/input-a", "edoc://alice/input-b")
 SENTINEL = "https://sentinel.example"
 CONTROLLER_AS = PS
 
@@ -360,6 +362,59 @@ def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver
     assert claims["controllers"] == list(EDOC_CONTROLLERS)
     assert claims["function_args"] == function_args
     assert claims["function_args_hash"] == hash_function_args(function_args)
+
+
+def test_edocs_resource_token_binds_direct_input_edocs(
+    resource_key, agent_key, agent, resolver
+):
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="identity@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        input_edoc_ids=EDOC_INPUTS,
+        key=resource_key,
+    )
+
+    claims = verify_resource_token(
+        token,
+        resolver,
+        aud=PS,
+        input_edoc_ids=EDOC_INPUTS,
+    )
+
+    assert claims["input_edoc_ids"] == list(EDOC_INPUTS)
+
+
+@pytest.mark.parametrize(
+    "input_edoc_ids",
+    [
+        ("edoc://alice/input-a", "edoc://alice/input-a"),
+        ("",),
+        ("edoc://alice/input-a", 7),
+        "edoc://alice/input-a",
+    ],
+)
+def test_edocs_resource_token_rejects_invalid_direct_inputs(
+    resource_key, agent_key, agent, input_edoc_ids
+):
+    with pytest.raises(ValueError, match="input_edoc_ids"):
+        issue_resource_token(
+            issuer=RESOURCE,
+            aud=PS,
+            agent=agent,
+            agent_jkt=agent_key.thumbprint,
+            scope="identity@1",
+            source_agent=EDOC_SOURCE,
+            edoc_id=EDOC_ID,
+            controllers=EDOC_CONTROLLERS,
+            input_edoc_ids=input_edoc_ids,
+            key=resource_key,
+        )
 
 
 def test_edocs_auth_token_roundtrip(ps_key, agent_key, agent, resolver):
