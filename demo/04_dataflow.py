@@ -159,6 +159,7 @@ def main() -> None:
     serve(make_resource(), 5002)
     serve(checkpoint(create_ps(PS_URL), "PS"), 5003)
     as_app = create_as(AS_URL)
+    # testing rule
     as_app.extensions["aauth_as"]["create_rule"](
         source_agent_id="*",
         function_id="avg_bp",
@@ -167,14 +168,15 @@ def main() -> None:
     )
     serve(checkpoint(as_app, "AS"), 5004)
     sentinel_app = create_sentinel(SENTINEL_URL)
-    # Genesis: resource initially possesses patient-42 (no prior inbound flow).
+    # testing provenance with a genesis record
     sentinel_app.extensions["sentinel"]["dataflows"].append(
         ProvenanceRecord(
             dataflow=create_dataflow(
                 source_agent_id="",
                 function_id="origin",
-                de_id=DATAFLOW["data"],
+                de_id="",
                 dest_agent_id=RESOURCE_URL,
+                derived_de_id=DATAFLOW["data"],
             ),
             controller=AS_URL,
         )

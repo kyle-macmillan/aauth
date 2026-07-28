@@ -45,7 +45,7 @@ def create_dataflow(
     function_id: str,
     de_id: str,
     dest_agent_id: str,
-    derived_de_id: str | None = None,
+    derived_de_id: str,
 ) -> Dataflow:
     return Dataflow(
         source_agent_id=source_agent_id,
