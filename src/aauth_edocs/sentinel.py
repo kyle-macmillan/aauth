@@ -8,6 +8,9 @@ AS auth token as a throwaway approval signal, and remints its own auth token.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from uuid import uuid4
+
 from flask import Flask, request
 
 from .agent import RequestsTransport
@@ -17,6 +20,41 @@ from .ids import DWK_ACCESS, DWK_SENTINEL
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata, fetch_metadata
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
+
+
+@dataclass(frozen=True)
+class Dataflow:
+    """Lightweight provenance record: source applies function to de for dest."""
+
+    source_agent_id: str
+    function_id: str
+    de_id: str
+    dest_agent_id: str
+    derived_de_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ProvenanceRecord:
+    """A dataflow edge recorded by the sentinel, bound to its controller AS."""
+
+    dataflow: Dataflow
+    controller: str
+
+
+def create_dataflow(
+    source_agent_id: str,
+    function_id: str,
+    de_id: str,
+    dest_agent_id: str,
+    derived_de_id: str | None = None,
+) -> Dataflow:
+    return Dataflow(
+        source_agent_id=source_agent_id,
+        function_id=function_id,
+        de_id=de_id,
+        dest_agent_id=dest_agent_id,
+        derived_de_id=derived_de_id,
+    )
 
 
 def create_sentinel(
@@ -31,7 +69,7 @@ def create_sentinel(
     key = key or SigningKey.generate(kid="sentinel")
     transport = transport or RequestsTransport()
     resolver = JwksResolver(transport)
-    app.extensions["sentinel"] = {"issuer": issuer, "key": key}
+    app.extensions["sentinel"] = {"issuer": issuer, "key": key, "dataflows": []}
 
     if "aauth_as_error_handler" not in app.extensions:
         app.extensions["aauth_as_error_handler"] = True
@@ -120,7 +158,8 @@ def create_sentinel(
         if not controller:
             raise AAuthError(INVALID_REQUEST, 400, "resource token missing controller (AS URL)")
 
-        _check_provenance(rt_claims, controller)
+        provenance_dataflows: list[ProvenanceRecord] = app.extensions["sentinel"]["dataflows"]
+        _check_provenance(rt_claims, controller, provenance_dataflows)
 
 
         as_token = _forward_to_as(
@@ -129,6 +168,8 @@ def create_sentinel(
             agent_token=body["agent_token"],
         )
         _check_as_token(rt_claims, agent_claims, controller, as_token)
+
+        _add_dataflow(rt_claims, provenance_dataflows)
         return _issue(agent_claims, rt_claims, as_token)
 
     def _forward_to_as(as_url: str, *, resource_token: str, agent_token: str) -> str:
@@ -191,6 +232,51 @@ def create_sentinel(
     return app
 
 
-def _check_provenance(rt_claims: dict, controller: str) -> None:
-    """Future: enforce that controllers match the provenance registry."""
-    return None
+def _check_provenance(
+    rt_claims: dict,
+    controller: str,
+    provenance_dataflows: list[ProvenanceRecord],
+) -> None:
+    """Check proposed dataflow is feasible from previously received data."""
+    token_dataflow = rt_claims.get("dataflow") or {}
+    proposed_de_id = token_dataflow.get("data")
+
+    source_agent_id = rt_claims.get("iss")
+    dest_agent_id = rt_claims.get("agent")
+
+    if not source_agent_id or not proposed_de_id or not dest_agent_id:
+        raise AAuthError(INVALID_REQUEST, 400, "resource token missing iss/dataflow.data/agent")
+
+    # The proposed source can only apply a function to data it already has.
+    # It "has" data if that data was previously sent to it as a destination.
+    feasible_inputs = [
+        record
+        for record in provenance_dataflows
+        if record.dataflow.dest_agent_id == source_agent_id
+        and (record.dataflow.derived_de_id == proposed_de_id or record.dataflow.de_id == proposed_de_id)
+    ]
+
+    if not feasible_inputs:
+        raise AAuthError(INVALID_TOKEN, 400, "proposed dataflow input was not previously sent to source")
+
+    if not any(record.controller == controller for record in feasible_inputs):
+        raise AAuthError(INVALID_REQUEST, 400, "controller does not match existing provenance")
+
+    # return None
+
+
+def _add_dataflow(rt_claims: dict, provenance_dataflows: list[ProvenanceRecord], derived_de_id: int) -> None:
+    """Adds the dataflow to provenance storage."""
+    token_dataflow = rt_claims.get("dataflow") or {}
+    record = ProvenanceRecord(
+        dataflow=create_dataflow(
+            source_agent_id=rt_claims["iss"],
+            function_id=token_dataflow["function"],
+            de_id=token_dataflow["data"],
+            dest_agent_id=rt_claims["agent"],
+            derived_de_id=derived_de_id,
+        ),
+        controller=rt_claims["controller"],
+    )
+    if record not in provenance_dataflows:
+        provenance_dataflows.append(record)
