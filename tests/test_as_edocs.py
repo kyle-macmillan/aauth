@@ -4,7 +4,6 @@ from aauth_edocs import (
     ControllerPolicy,
     Dataflow,
     ExactRule,
-    FunctionDescriptor,
     HttpRequest,
     SigningKey,
     build_metadata,
@@ -70,14 +69,6 @@ def _world(conditional=False):
         transport=transport,
         sentinel=SENTINEL,
         controller_policy=ControllerPolicy((rule,)),
-        functions={
-            "identity@1": FunctionDescriptor(
-                id="identity@1",
-                description="Return the eDoc unchanged",
-                implementation_uri="memory://identity",
-                digest="sha256:identity",
-            )
-        },
     )
     transport.add(CONTROLLER, app)
     return {

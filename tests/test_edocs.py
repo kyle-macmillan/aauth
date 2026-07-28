@@ -11,7 +11,6 @@ from aauth_edocs import (
     SentinelRegistry,
     canonicalize_function_args,
     hash_function_args,
-    validate_function_args,
 )
 
 
@@ -65,7 +64,7 @@ def test_function_arguments_have_a_size_limit():
         canonicalize_function_args({"value": "x" * MAX_FUNCTION_ARGS_BYTES})
 
 
-def test_function_descriptor_validates_arbitrary_json_object_schema():
+def test_function_descriptor_carries_resource_owned_input_schema_metadata():
     descriptor = FunctionDescriptor(
         id="search@1",
         description="Search text",
@@ -82,9 +81,8 @@ def test_function_descriptor_validates_arbitrary_json_object_schema():
         },
     )
 
-    validate_function_args(descriptor, {"query": "termination", "limit": 20})
-    with pytest.raises(ValueError, match="input schema"):
-        validate_function_args(descriptor, {"query": "termination", "limit": 0})
+    assert descriptor.input_schema["required"] == ["query"]
+    assert descriptor.input_schema["properties"]["limit"]["minimum"] == 1
 
 
 def test_exact_rule_matches_only_its_complete_dataflow():

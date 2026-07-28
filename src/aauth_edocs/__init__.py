@@ -16,7 +16,6 @@ from .edocs import (
     SentinelRegistry,
     canonicalize_function_args,
     hash_function_args,
-    validate_function_args,
 )
 from .edocs_consent import EdocsApprovalHandler, EdocsApprovalRequest, EdocsConsentClient
 from .errors import AAuthError

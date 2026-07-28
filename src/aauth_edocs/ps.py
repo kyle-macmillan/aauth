@@ -45,7 +45,7 @@ def create_ps(
     permission_policy: PermissionPolicy | None = None,
     transport=None,
     agent_bindings: dict[str, str] | None = None,
-    consents: set[tuple[str, str, str, str]] | None = None,
+    consents: set[tuple[str, ...]] | None = None,
 ) -> Flask:
     app = Flask("aauth-ps")
     app.secret_key = f"aauth-edocs-dev-ps:{issuer}"
@@ -355,10 +355,17 @@ def create_ps(
         agent_bindings[context["agent_claims"]["sub"]] = person
         consents.add(_consent_key(context))
 
-    def _consent_key(context: dict) -> tuple[str, str, str, str]:
+    def _consent_key(context: dict) -> tuple[str, ...]:
         rt_claims = context["rt_claims"]
         agent_claims = context.get("subagent_claims") or context["agent_claims"]
-        return person, agent_claims["sub"], rt_claims["iss"], rt_claims.get("scope") or ""
+        key = (
+            person,
+            agent_claims["sub"],
+            rt_claims["iss"],
+            rt_claims.get("scope") or "",
+        )
+        function_args_hash = rt_claims.get("function_args_hash")
+        return key + (function_args_hash,) if function_args_hash is not None else key
 
     def _granted_scope(context: dict) -> str | None:
         rt_scope = context["rt_claims"].get("scope")

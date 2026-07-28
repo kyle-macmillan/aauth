@@ -104,7 +104,6 @@ def _world(*, conditional=False, controller_b_denies=False):
             transport=transport,
             sentinel=SENTINEL,
             controller_policy=policy_a,
-            functions=registry.functions,
         ),
     )
     transport.add(
@@ -115,7 +114,6 @@ def _world(*, conditional=False, controller_b_denies=False):
             transport=transport,
             sentinel=SENTINEL,
             controller_policy=policy_b,
-            functions=registry.functions,
         ),
     )
     sentinel_app = create_sentinel(

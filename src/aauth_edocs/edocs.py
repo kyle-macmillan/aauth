@@ -13,9 +13,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from jsonschema import Draft202012Validator
-
-
 MAX_FUNCTION_ARGS_BYTES = 16 * 1024
 _FUNCTION_ARGS_DOMAIN = b"aauth-edocs-function-args-v1\0"
 
@@ -53,21 +50,6 @@ def hash_function_args(arguments: Mapping[str, Any] | None = None) -> str:
 
 
 EMPTY_FUNCTION_ARGS_HASH = hash_function_args()
-
-
-def validate_function_args(
-    descriptor: FunctionDescriptor,
-    arguments: Mapping[str, Any] | None = None,
-) -> None:
-    """Validate an argument object against a registered function descriptor."""
-    value = {} if arguments is None else dict(arguments)
-    canonicalize_function_args(value)
-    errors = sorted(
-        Draft202012Validator(descriptor.input_schema).iter_errors(value),
-        key=lambda error: list(error.absolute_path),
-    )
-    if errors:
-        raise ValueError(f"function arguments do not match input schema: {errors[0].message}")
 
 
 @dataclass(frozen=True)
@@ -192,10 +174,6 @@ class FunctionDescriptor:
             "additionalProperties": False,
         }
     )
-
-    def __post_init__(self) -> None:
-        Draft202012Validator.check_schema(self.input_schema)
-
 
 @dataclass(frozen=True)
 class ResourceBinding:

@@ -8,7 +8,7 @@ from typing import Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
-from .edocs import Dataflow, SentinelRegistry, validate_function_args
+from .edocs import Dataflow, SentinelRegistry
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
 from .httpsig import HttpRequest, KeyResolver, peek_jwt, sign_server, verify
 from .ids import DWK_ACCESS, DWK_PERSON
@@ -120,10 +120,6 @@ def create_sentinel(
         descriptor = registry.functions.get(scope)
         if descriptor is None:
             raise AAuthError(DENIED, 403, "requested function is not registered")
-        try:
-            validate_function_args(descriptor, rt_claims.get("function_args"))
-        except ValueError as error:
-            raise AAuthError(INVALID_TOKEN, 400, str(error)) from error
         proposal = Dataflow.from_arguments(
             source=rt_claims["source_agent"],
             function=scope,
