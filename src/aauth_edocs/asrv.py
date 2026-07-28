@@ -15,7 +15,7 @@ from typing import Any, Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
-from .controller import ControllerPolicy, issue_controller_decision
+from .controller import ControllerPolicyEvaluator, issue_controller_decision
 from .edocs import Dataflow
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
@@ -40,7 +40,7 @@ def create_as(
     jwks_path: str = "/jwks.json",
     pending_path: str = "/pending",
     sentinel: str | None = None,
-    controller_policy: ControllerPolicy | None = None,
+    controller_policy: ControllerPolicyEvaluator | None = None,
 ) -> Flask:
     if (sentinel is None) != (controller_policy is None):
         raise ValueError("sentinel and controller_policy must be configured together")

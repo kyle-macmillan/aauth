@@ -9,8 +9,9 @@ Traditional AAuth remains on `aauth/main`; reusable eDocs extension work
 belongs on `aauth/edocs-demo` and `mcp-aauth/edocs-demo`, while Codex-specific
 composition and UI behavior belongs in `mcp-aauth-codex`.
 
-**Last handoff update:** 2026-07-27. The exact-argument DuckDB vertical slice
-is implemented and tested. Section 15 is the authoritative current handoff;
+**Last handoff update:** 2026-07-28. The reusable provider, mutable policy,
+shared function registry, derived-output policy, dashboard, and multi-agent
+demo work is implemented and tested. Section 16 is the authoritative handoff;
 older milestone sections remain as design history.
 
 ## 1. Current repository state
@@ -705,3 +706,251 @@ catalog discovery, and opaque eDoc routing. Reuse `FunctionLoader`,
 `DemoResource.authorize`, and `DemoResource.execute`; do not introduce an
 AAuth-side query language or schema validator. Add dashboards only after
 multi-provider routing and isolation pass end-to-end tests.
+
+## 16. Current handoff: reusable providers, live administration, functions,
+derived outputs, and multiple agent sessions
+
+### 16.1 Repository and branch state
+
+- `aauth`
+  - Branch: `edocs-demo`.
+  - Remote: `origin` (`kyle-macmillan/aauth`).
+  - Owns reusable eDocs policy, provenance, and derived-output semantics.
+- `mcp-aauth`
+  - Branch: `edocs-demo`.
+  - Remote: `origin` (`kyle-macmillan/mcp-aauth`).
+  - Remains unchanged in this session. It continues to own generic MCP/AAuth
+    transport and middleware behavior.
+- `mcp-python-sdk`
+  - Branch: `aauth-auth-middleware-hook`.
+  - Remotes: `origin` and upstream MCP SDK.
+  - Remains unchanged in this session.
+- `mcp-edocs-provider`
+  - Branch: `main`.
+  - New standalone local repository created this session.
+  - It currently has no Git remote. It must be given a remote before it can
+    be pushed.
+  - Owns reusable provider catalogs, function loaders/registries, protected
+    provider execution, provider binding, and MCP/HTTP construction.
+- `mcp-aauth-codex`
+  - Branch: `main`.
+  - Remote: `origin` (`kyle-macmillan/mcp-aauth-codex`).
+  - Owns Codex-facing tools, localhost composition, dashboards, seeded data,
+    SQL runtime, and launchers.
+- `eDocs-system`
+  - Branch: `kyle/rules`.
+  - Contains a separate dirty implementation effort and an untracked
+    `docs/implementation-brief.md`.
+  - It was inspected but not changed or committed by this AAuth demo session.
+
+### 16.2 Provider discovery and routing
+
+- The Codex proxy exposes only:
+  - `list_providers`;
+  - `list_resources(provider_id)`;
+  - `invoke_edocs_function(resource_uri, function_id, arguments)`; and,
+    when the demo registry URL is configured,
+  - `register_edocs_function`.
+- Provider configuration is a private proxy-side directory, not an MCP
+  resource. Codex sees public provider names and descriptions, then explicitly
+  calls the selected provider to discover its current resources.
+- Alice, Bob, and Carol have distinct resource issuers, MCP endpoints, Access
+  Servers, source agents, signing keys, catalogs, and DuckDB files.
+- The provider ID is repeated during authorization and execution. A directory
+  entry that routes Alice to Bob's endpoint is rejected before consent or
+  materialization.
+- Resource discovery returns only resource identity and descriptive metadata.
+  Media type, compatible functions, enabled functions, filenames, and private
+  storage paths are not presented as resource-owned authorization facts.
+
+### 16.3 Standalone reusable provider package
+
+`mcp-edocs-provider` was extracted so generic eDocs/provider behavior does not
+live in the Codex integration repository. It includes:
+
+- a thread-safe mutable `ProviderCatalog`;
+- runtime catalog insertion, metadata updates, and enable/disable behavior;
+- `ProviderResource` authorization and final-token enforcement;
+- injected `FunctionLoader` and `LoadedFunction` interfaces;
+- a thread-safe shared `MutableFunctionRegistry`;
+- public MCP catalog discovery;
+- provider identity enforcement;
+- protected generic function execution; and
+- an optional post-execution materialization recorder.
+
+The package contains no Codex UI, seeded demo data, or controller policy.
+
+### 16.4 Mutable controller policy
+
+`aauth_edocs` now provides:
+
+- `ControllerPolicyEvaluator`, allowing the AS to consume a policy interface
+  rather than one concrete policy type;
+- thread-safe `MutableControllerPolicy`;
+- stable rule IDs;
+- list, create, replace, delete, and exact evaluation operations;
+- duplicate target and rule-ID rejection;
+- framework-neutral policy/dataflow JSON parsing and serialization; and
+- concurrent read/write coverage.
+
+Each provider receives an independent policy store. Policy changes take effect
+immediately without changing catalogs or prior provenance. Restarting the
+demo restores the seeded policies.
+
+No Flask application or production administration protocol was added to
+`aauth_edocs`. The localhost demo control panel is only an adapter over these
+reusable objects.
+
+### 16.5 Demo control panel
+
+The demo starts one unauthenticated localhost control service at:
+
+```text
+http://127.0.0.1:8721/demo
+```
+
+It is explicitly development-only and is not exposed through the agent-facing
+MCP server. Alice, Bob, and Carol tabs support:
+
+- CSV upload into provider-private DuckDB storage;
+- document rename and enable/disable;
+- live function tables showing ID, description, SQL/artifact, and
+  provider-specific policy status;
+- concise policy cards displaying function, document selector, source,
+  destination, exact arguments, and prerequisite;
+- add-policy selectors populated from live documents, agents, functions, and
+  materialized prerequisites; and
+- a separate edit dialog so policy lists do not expand into large forms.
+
+The Sentinel tab shows:
+
+- demo agent identities;
+- resource bindings;
+- authoritative controllers;
+- registered functions and actual SQL/artifacts;
+- materialized dataflows; and
+- registered derived eDocs with producer provenance and output digests.
+
+Routine Werkzeug and Uvicorn access logs are disabled so background HTTP
+traffic does not overwrite the Codex terminal UI. Warnings and errors remain
+visible.
+
+### 16.6 Shared function registry and agent-created functions
+
+- One shared mutable function registry is used by Sentinel and all three
+  providers in the demo.
+- The demo seeds:
+  - `query_table@1`;
+  - `identity@1`;
+  - `department_counts@1`;
+  - `average_salary_by_department@1`; and
+  - `employee_count@1`.
+- The dashboard and Codex tool can register new schema-conforming artifacts.
+- The generic registration envelope contains function ID, description, input
+  schema, and implementation `{runtime, source}`.
+- The current demo runtime accepts one read-only SQL `SELECT`/`WITH`
+  statement. The server computes the immutable descriptor digest.
+- Registration makes a function discoverable and executable but creates no
+  invocation policy.
+- Providers execute newly registered functions through one protected generic
+  MCP executor, so MCP tools do not need to be dynamically rebuilt.
+- End-to-end coverage proves:
+  1. Codex registers a SQL function;
+  2. the function appears in the shared registry;
+  3. Alice denies its invocation without a policy;
+  4. Alice adds an exact policy; and
+  5. the unchanged invocation succeeds.
+
+### 16.7 Future derived-output policies and materialization
+
+Authorization issuance is no longer treated as proof of execution.
+`aggregate_controller_decisions` issues the final token without modifying
+materialization state. After a provider function completes successfully, the
+provider invokes the injected demo recorder.
+
+The recorder creates a `DerivedEdoc` containing:
+
+- a unique opaque `derived_...` ID;
+- an `edoc://derived/...` URI;
+- the exact producer dataflow;
+- a stable producer fingerprint;
+- an output content digest;
+- the producer destination as custodian; and
+- inherited controllers.
+
+`Dataflow.document` can now contain `OutputOf(exact_producer)` in controller
+policy. The selector can be created before any output exists. A
+`MutableControllerPolicy` resolves a later concrete derived ID through trusted
+provenance and matches the other exact dataflow fields.
+
+Alice's seeded policies are:
+
+```text
+Alice source → query_table@1(employee directory, engineering args) → Codex
+
+Any output of the exact producer above may flow as:
+Codex → identity@1(derived output) → Carol
+```
+
+There is no corresponding Bob destination rule. Tests prove that the future
+rule does not match an unknown output, begins matching Carol after successful
+materialization, and still rejects Bob.
+
+For the single-process demo, the successful provider calls an injected
+recorder directly. A production split deployment still requires a signed
+provider execution receipt and a remotely accessible derived-resource
+service. The latter is deliberately deferred.
+
+### 16.8 Multiple Codex agent sessions
+
+The demo now generates distinct keys, agent tokens, and environment files for:
+
+- Producer: `aauth:codex@demo.local`;
+- Carol: `aauth:carol@demo.local`; and
+- Bob: `aauth:bob@demo.local`.
+
+Files live under:
+
+```text
+.demo-state/agents/{producer,carol,bob}.{env,jwk,token}
+```
+
+Each file is mode `0600`; all three key paths and agent-token subjects are
+distinct. `scripts/run_agent.sh` launches one role. The existing
+`scripts/run_demo.sh` launches only Producer.
+
+`scripts/run_multi_agent_demo.sh` starts the shared backend and opens a tiled
+`tmux` session with Producer, Carol, and Bob Codex panes. The three windows
+share providers, Sentinel, registry, and control panel but receive only their
+own credentials.
+
+Carol and Bob can currently demonstrate independent identities and public
+catalog discovery. Actual invocation of producer-derived outputs remains
+deferred with the derived-resource service and dynamic provider destination
+handling, per the explicit scope decision.
+
+### 16.9 Verification at this handoff
+
+- `aauth`: 221 passed, 1 skipped.
+- `mcp-edocs-provider`: 7 passed.
+- `mcp-aauth-codex`: 22 passed.
+- Provider isolation, misrouting rejection, live policy mutation, restart,
+  shared-function registration, denial-before-policy, execution-after-policy,
+  post-execution derived-eDoc registration, Carol/Bob output-policy matching,
+  multi-agent credential isolation, real stdio, and live HTTP/MCP flows are
+  covered.
+- Dashboard JavaScript passes `node --check`.
+- Shell launchers pass `bash -n`.
+- All affected repositories pass `git diff --check`.
+
+### 16.10 Deferred work
+
+- Derived eDocs are tracked by the Sentinel demo registry but are not yet
+  served by a dedicated derived-resource MCP endpoint.
+- Provider execution still has one configured destination identity; dynamic
+  destination handling is deferred.
+- Therefore Carol and Bob cannot yet perform the final live
+  allow-versus-deny derived-output invocation in their separate windows.
+- Replace the in-process materialization callback with a signed execution
+  receipt before treating this as a production trust boundary.
+- Assign a Git remote to `mcp-edocs-provider`, then push its `main` branch.

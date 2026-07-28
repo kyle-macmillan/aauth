@@ -135,7 +135,7 @@ def test_two_unconditional_approvals_mint_one_final_token(
     assert claims["aud"] == RESOURCE
     assert claims["agent"] == proposal.destination
     assert claims["controllers"] == [AS_A, AS_B]
-    assert proposal in registry.materialized
+    assert proposal not in registry.materialized
     verify_auth_token(
         token,
         decision_resolver,
@@ -187,7 +187,7 @@ def test_satisfied_conditional_and_unconditional_approvals_succeed(
         registry=registry,
     )
 
-    assert proposal in registry.materialized
+    assert proposal not in registry.materialized
 
 
 def test_missing_prerequisite_denies_without_materializing(

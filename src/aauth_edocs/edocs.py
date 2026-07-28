@@ -12,6 +12,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 MAX_FUNCTION_ARGS_BYTES = 16 * 1024
 _FUNCTION_ARGS_DOMAIN = b"aauth-edocs-function-args-v1\0"
@@ -58,7 +59,7 @@ class Dataflow:
 
     source: str
     function: str
-    document: str
+    document: str | OutputOf
     destination: str
     canonical_arguments: str = "{}"
 
@@ -76,7 +77,7 @@ class Dataflow:
         cls,
         source: str,
         function: str,
-        document: str,
+        document: str | OutputOf,
         destination: str,
         arguments: Mapping[str, Any] | None = None,
     ) -> Dataflow:
@@ -95,6 +96,52 @@ class Dataflow:
     @property
     def function_args_hash(self) -> str:
         return hash_function_args(self.function_args)
+
+
+@dataclass(frozen=True)
+class OutputOf:
+    """Select any derived eDoc produced by one exact future dataflow."""
+
+    producer: Dataflow
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.producer.document, str):
+            raise ValueError("output producer must reference a concrete eDoc")
+
+    @property
+    def fingerprint(self) -> str:
+        value = {
+            "source": self.producer.source,
+            "function": self.producer.function,
+            "document": self.producer.document,
+            "destination": self.producer.destination,
+            "function_args_hash": self.producer.function_args_hash,
+        }
+        encoded = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+@dataclass(frozen=True)
+class DerivedEdoc:
+    """Trusted provenance metadata for one materialized function output."""
+
+    edoc_id: str
+    producer: Dataflow
+    output_digest: str
+    custodian: str
+    controllers: tuple[str, ...]
+
+    @property
+    def resource_uri(self) -> str:
+        return f"edoc://derived/{self.edoc_id}"
+
+    @property
+    def producer_fingerprint(self) -> str:
+        return OutputOf(self.producer).fingerprint
 
 
 @dataclass(frozen=True, eq=False)
@@ -198,3 +245,31 @@ class SentinelRegistry:
     controllers: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
     functions: dict[str, FunctionDescriptor] = field(default_factory=dict)
     materialized: set[Dataflow] = field(default_factory=set)
+    derived_documents: dict[str, DerivedEdoc] = field(default_factory=dict)
+
+
+def register_materialization(
+    registry: SentinelRegistry,
+    *,
+    producer: Dataflow,
+    output: Any,
+    controllers: tuple[str, ...],
+) -> DerivedEdoc:
+    """Record a successful execution and mint its opaque derived eDoc ID."""
+    encoded = json.dumps(
+        output,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    derived = DerivedEdoc(
+        edoc_id=f"derived_{uuid4().hex}",
+        producer=producer,
+        output_digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
+        custodian=producer.destination,
+        controllers=controllers,
+    )
+    registry.materialized.add(producer)
+    registry.derived_documents[derived.edoc_id] = derived
+    return derived

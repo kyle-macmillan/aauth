@@ -177,7 +177,7 @@ def test_sentinel_http_flow_mints_one_final_resource_token():
     assert claims["iss"] == SENTINEL
     assert claims["aud"] == RESOURCE
     assert claims["controllers"] == [AS_A, AS_B]
-    assert world["proposal"] in world["registry"].materialized
+    assert world["proposal"] not in world["registry"].materialized
     verify_auth_token(
         token,
         JwksResolver(world["transport"]),
@@ -304,4 +304,4 @@ def test_missing_conditional_prerequisite_prevents_final_token():
     assert denied.status_code == 403
     assert "has not materialized" in denied.json()["detail"]
     assert approved.status_code == 200
-    assert world["proposal"] in world["registry"].materialized
+    assert world["proposal"] not in world["registry"].materialized

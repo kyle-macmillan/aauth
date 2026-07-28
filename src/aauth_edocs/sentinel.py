@@ -286,7 +286,6 @@ def aggregate_controller_decisions(
         lifetime=lifetime,
         now=now,
     )
-    registry.materialized.add(proposal)
     return token
 
 

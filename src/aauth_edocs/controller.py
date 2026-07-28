@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Protocol
 
 from .edocs import Dataflow, ExactRule
 from .errors import AAuthError, DENIED
@@ -13,6 +13,10 @@ from .keys import SigningKey
 from .tokens import issue_auth_token, issue_conditional_auth_token
 
 Now = Callable[[], float]
+
+
+class ControllerPolicyEvaluator(Protocol):
+    def evaluate(self, proposal: Dataflow) -> ExactRule | None: ...
 
 
 @dataclass(frozen=True)
@@ -34,7 +38,7 @@ class ControllerPolicy:
 def issue_controller_decision(
     *,
     proposal: Dataflow,
-    policy: ControllerPolicy,
+    policy: ControllerPolicyEvaluator,
     issuer: str,
     sentinel: str,
     agent_jwk: dict,
