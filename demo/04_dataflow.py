@@ -35,6 +35,7 @@ from aauth_edocs import (
     peek_jwt,
     require_auth_token,
 )
+from aauth_edocs.sentinel import ProvenanceRecord, create_dataflow
 
 AP_URL = "http://127.0.0.1:5001"
 RESOURCE_URL = "http://127.0.0.1:5002"
@@ -165,7 +166,20 @@ def main() -> None:
         dest_agent_id="*",
     )
     serve(checkpoint(as_app, "AS"), 5004)
-    serve(checkpoint(create_sentinel(SENTINEL_URL), "sentinel"), 5005)
+    sentinel_app = create_sentinel(SENTINEL_URL)
+    # Genesis: resource initially possesses patient-42 (no prior inbound flow).
+    sentinel_app.extensions["sentinel"]["dataflows"].append(
+        ProvenanceRecord(
+            dataflow=create_dataflow(
+                source_agent_id="",
+                function_id="origin",
+                de_id=DATAFLOW["data"],
+                dest_agent_id=RESOURCE_URL,
+            ),
+            controller=AS_URL,
+        )
+    )
+    serve(checkpoint(sentinel_app, "sentinel"), 5005)
 
     wait_for(f"{AP_URL}/.well-known/aauth-agent.json")
     wait_for(f"{RESOURCE_URL}/.well-known/aauth-resource.json")
