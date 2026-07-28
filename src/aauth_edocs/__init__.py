@@ -5,7 +5,19 @@ the simplifications relative to the spec."""
 from .controller import ControllerPolicy, issue_controller_decision
 from .coordinator import ApprovalRequired, AuthorizationCoordinator, resource_origin
 from .deferred import PendingStore, poll
-from .edocs import Dataflow, ExactRule, FunctionDescriptor, ResourceBinding, SentinelRegistry
+from .edocs import (
+    EMPTY_FUNCTION_ARGS_HASH,
+    MAX_FUNCTION_ARGS_BYTES,
+    Dataflow,
+    DataflowBinding,
+    ExactRule,
+    FunctionDescriptor,
+    ResourceBinding,
+    SentinelRegistry,
+    canonicalize_function_args,
+    hash_function_args,
+    validate_function_args,
+)
 from .edocs_consent import EdocsApprovalHandler, EdocsApprovalRequest, EdocsConsentClient
 from .errors import AAuthError
 from .headers import (

@@ -10,14 +10,15 @@ Module is named `asrv` because `as` is a Python keyword.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Callable
 
 from flask import Flask, request
 
 from .agent import RequestsTransport
 from .controller import ControllerPolicy, issue_controller_decision
-from .edocs import Dataflow
-from .errors import AAuthError, INVALID_REQUEST, INVALID_TOKEN
+from .edocs import Dataflow, FunctionDescriptor, validate_function_args
+from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
 from .headers import APPROVAL, CLAIMS, INTERACTION, build_requirement
 from .httpsig import HttpRequest, verify
@@ -41,9 +42,12 @@ def create_as(
     pending_path: str = "/pending",
     sentinel: str | None = None,
     controller_policy: ControllerPolicy | None = None,
+    functions: Mapping[str, FunctionDescriptor] | None = None,
 ) -> Flask:
     if (sentinel is None) != (controller_policy is None):
         raise ValueError("sentinel and controller_policy must be configured together")
+    if sentinel is not None and functions is None:
+        raise ValueError("eDocs controller mode requires registered functions")
     app = app or Flask("aauth-as")
     key = key or SigningKey.generate(kid="as")
     resolver = JwksResolver(transport or RequestsTransport())
@@ -108,11 +112,19 @@ def create_as(
                 for name in ("source_agent", "edoc_id")
             ) or not isinstance(rt_claims.get("controllers"), list):
                 raise AAuthError(INVALID_TOKEN, 400, "eDocs resource token claims are required")
-            proposal = Dataflow(
+            descriptor = functions.get(scope)
+            if descriptor is None:
+                raise AAuthError(DENIED, 403, "requested function is not registered")
+            try:
+                validate_function_args(descriptor, rt_claims.get("function_args"))
+            except ValueError as error:
+                raise AAuthError(INVALID_TOKEN, 400, str(error)) from error
+            proposal = Dataflow.from_arguments(
                 source=rt_claims["source_agent"],
                 function=scope,
                 document=rt_claims["edoc_id"],
                 destination=agent_claims["sub"],
+                arguments=rt_claims["function_args"],
             )
             token = issue_controller_decision(
                 proposal=proposal,

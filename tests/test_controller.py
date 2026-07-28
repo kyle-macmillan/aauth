@@ -50,6 +50,34 @@ def test_controller_policy_matches_only_complete_dataflow():
     assert policy.evaluate(_flow(destination="aauth:other@ap.example")) is None
 
 
+def test_controller_policy_matches_canonical_arguments_exactly():
+    proposal = Dataflow.from_arguments(
+        "aauth:source@ap.example",
+        "search@1",
+        "doc-123",
+        "aauth:assistant@ap.example",
+        {"query": "termination", "limit": 20},
+    )
+    reordered = Dataflow.from_arguments(
+        proposal.source,
+        proposal.function,
+        proposal.document,
+        proposal.destination,
+        {"limit": 20, "query": "termination"},
+    )
+    changed = Dataflow.from_arguments(
+        proposal.source,
+        proposal.function,
+        proposal.document,
+        proposal.destination,
+        {"query": "termination", "limit": 100},
+    )
+    policy = ControllerPolicy((ExactRule(proposal),))
+
+    assert policy.evaluate(reordered) == policy.rules[0]
+    assert policy.evaluate(changed) is None
+
+
 def test_controller_policy_rejects_duplicate_targets():
     proposal = _flow()
     with pytest.raises(ValueError, match="duplicate"):

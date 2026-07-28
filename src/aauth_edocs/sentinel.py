@@ -8,7 +8,7 @@ from typing import Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
-from .edocs import Dataflow, SentinelRegistry
+from .edocs import Dataflow, SentinelRegistry, validate_function_args
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
 from .httpsig import HttpRequest, KeyResolver, peek_jwt, sign_server, verify
 from .ids import DWK_ACCESS, DWK_PERSON
@@ -117,11 +117,19 @@ def create_sentinel(
         ) or not isinstance(rt_claims.get("controllers"), list):
             raise AAuthError(INVALID_TOKEN, 400, "eDocs resource token claims are required")
 
-        proposal = Dataflow(
+        descriptor = registry.functions.get(scope)
+        if descriptor is None:
+            raise AAuthError(DENIED, 403, "requested function is not registered")
+        try:
+            validate_function_args(descriptor, rt_claims.get("function_args"))
+        except ValueError as error:
+            raise AAuthError(INVALID_TOKEN, 400, str(error)) from error
+        proposal = Dataflow.from_arguments(
             source=rt_claims["source_agent"],
             function=scope,
             document=rt_claims["edoc_id"],
             destination=agent_claims["sub"],
+            arguments=rt_claims["function_args"],
         )
         binding = registry.resource_bindings.get(proposal.source)
         if binding is None:
@@ -130,9 +138,6 @@ def create_sentinel(
             raise AAuthError(DENIED, 403, "resource token issuer does not match its provisioned binding")
         if jwk_thumbprint(resource_jwk) != binding.resource_jkt:
             raise AAuthError(DENIED, 403, "resource token key does not match its provisioned binding")
-        if proposal.function not in registry.functions:
-            raise AAuthError(DENIED, 403, "requested function is not registered")
-
         controller_key = (rt_claims["iss"], proposal.document)
         authoritative = registry.controllers.get(controller_key)
         discovered = authoritative is None
@@ -238,6 +243,7 @@ def aggregate_controller_decisions(
                     scope=proposal.function,
                     edoc_id=proposal.document,
                     controllers=advisory_controllers,
+                    function_args_hash=proposal.function_args_hash,
                     now=now,
                 )
                 if claims.get("iss") != controller:
@@ -256,9 +262,13 @@ def aggregate_controller_decisions(
                     scope=proposal.function,
                     edoc_id=proposal.document,
                     controllers=advisory_controllers,
+                    function_args_hash=proposal.function_args_hash,
                     now=now,
                 )
-                if prerequisite not in registry.materialized:
+                if not any(
+                    prerequisite.matches(materialized)
+                    for materialized in registry.materialized
+                ):
                     raise AAuthError(DENIED, 403, "controller prerequisite has not materialized")
             else:
                 raise AAuthError(DENIED, 403, f"unsupported controller token type {typ!r}")
@@ -275,6 +285,7 @@ def aggregate_controller_decisions(
         source_agent=proposal.source,
         edoc_id=proposal.document,
         controllers=controllers,
+        function_args_hash=proposal.function_args_hash,
         key=sentinel_key,
         lifetime=lifetime,
         now=now,

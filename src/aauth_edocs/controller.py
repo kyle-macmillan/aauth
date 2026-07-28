@@ -61,6 +61,7 @@ def issue_controller_decision(
         "source_agent": proposal.source,
         "edoc_id": proposal.document,
         "controllers": controllers,
+        "function_args_hash": proposal.function_args_hash,
         "key": key,
         "lifetime": lifetime,
         "now": now,

@@ -7,17 +7,162 @@ keeps the demo's in-memory state explicit and replaceable.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
+
+from jsonschema import Draft202012Validator
+
+
+MAX_FUNCTION_ARGS_BYTES = 16 * 1024
+_FUNCTION_ARGS_DOMAIN = b"aauth-edocs-function-args-v1\0"
+
+
+def canonicalize_function_args(arguments: Mapping[str, Any] | None = None) -> bytes:
+    """Return the deterministic JSON representation of one MCP argument object."""
+    value = {} if arguments is None else arguments
+    if not isinstance(value, Mapping):
+        raise ValueError("function arguments must be a JSON object")
+    if any(not isinstance(key, str) for key in value):
+        raise ValueError("function argument keys must be strings")
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as error:
+        raise ValueError("function arguments must contain only finite JSON values") from error
+    if len(encoded) > MAX_FUNCTION_ARGS_BYTES:
+        raise ValueError(
+            f"canonical function arguments exceed {MAX_FUNCTION_ARGS_BYTES} bytes"
+        )
+    return encoded
+
+
+def hash_function_args(arguments: Mapping[str, Any] | None = None) -> str:
+    """Return the versioned digest bound into eDocs authorization tokens."""
+    digest = hashlib.sha256(
+        _FUNCTION_ARGS_DOMAIN + canonicalize_function_args(arguments)
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+EMPTY_FUNCTION_ARGS_HASH = hash_function_args()
+
+
+def validate_function_args(
+    descriptor: FunctionDescriptor,
+    arguments: Mapping[str, Any] | None = None,
+) -> None:
+    """Validate an argument object against a registered function descriptor."""
+    value = {} if arguments is None else dict(arguments)
+    canonicalize_function_args(value)
+    errors = sorted(
+        Draft202012Validator(descriptor.input_schema).iter_errors(value),
+        key=lambda error: list(error.absolute_path),
+    )
+    if errors:
+        raise ValueError(f"function arguments do not match input schema: {errors[0].message}")
 
 
 @dataclass(frozen=True)
 class Dataflow:
-    """An exact eDocs operation: source, function, document, destination."""
+    """An exact eDocs operation, including its canonical argument object."""
 
     source: str
     function: str
     document: str
     destination: str
+    canonical_arguments: str = "{}"
+
+    def __post_init__(self) -> None:
+        try:
+            decoded = json.loads(self.canonical_arguments)
+            canonical = canonicalize_function_args(decoded).decode("utf-8")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as error:
+            raise ValueError("canonical_arguments must be a canonical JSON object") from error
+        if canonical != self.canonical_arguments:
+            raise ValueError("canonical_arguments must use canonical JSON encoding")
+
+    @classmethod
+    def from_arguments(
+        cls,
+        source: str,
+        function: str,
+        document: str,
+        destination: str,
+        arguments: Mapping[str, Any] | None = None,
+    ) -> Dataflow:
+        return cls(
+            source,
+            function,
+            document,
+            destination,
+            canonicalize_function_args(arguments).decode("utf-8"),
+        )
+
+    @property
+    def function_args(self) -> dict[str, Any]:
+        return json.loads(self.canonical_arguments)
+
+    @property
+    def function_args_hash(self) -> str:
+        return hash_function_args(self.function_args)
+
+
+@dataclass(frozen=True, eq=False)
+class DataflowBinding:
+    """Token-safe identity of a dataflow whose full arguments are not repeated."""
+
+    source: str
+    function: str
+    document: str
+    destination: str
+    function_args_hash: str = EMPTY_FUNCTION_ARGS_HASH
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Dataflow):
+            return self.matches(other)
+        if isinstance(other, DataflowBinding):
+            return (
+                self.source,
+                self.function,
+                self.document,
+                self.destination,
+                self.function_args_hash,
+            ) == (
+                other.source,
+                other.function,
+                other.document,
+                other.destination,
+                other.function_args_hash,
+            )
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                self.source,
+                self.function,
+                self.document,
+                self.destination,
+                self.function_args_hash,
+            )
+        )
+
+    def matches(self, dataflow: Dataflow) -> bool:
+        return (
+            self.source == dataflow.source
+            and self.function == dataflow.function
+            and self.document == dataflow.document
+            and self.destination == dataflow.destination
+            and self.function_args_hash == dataflow.function_args_hash
+        )
 
 
 @dataclass(frozen=True)
@@ -40,6 +185,16 @@ class FunctionDescriptor:
     description: str
     implementation_uri: str
     digest: str
+    input_schema: dict[str, Any] = field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+    )
+
+    def __post_init__(self) -> None:
+        Draft202012Validator.check_schema(self.input_schema)
 
 
 @dataclass(frozen=True)

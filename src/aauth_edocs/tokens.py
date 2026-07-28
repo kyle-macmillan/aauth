@@ -11,12 +11,19 @@ from __future__ import annotations
 
 import secrets
 import time
+from collections.abc import Mapping
 from typing import Callable
 
 from joserfc import jwt as joserfc_jwt
 from joserfc.jwk import OKPKey
 
-from .edocs import Dataflow
+from .edocs import (
+    EMPTY_FUNCTION_ARGS_HASH,
+    Dataflow,
+    DataflowBinding,
+    canonicalize_function_args,
+    hash_function_args,
+)
 from .errors import AAuthError, INVALID_TOKEN
 from .httpsig import KeyResolver, verify_jwt
 from .ids import DWK_ACCESS, DWK_AGENT, DWK_PERSON, DWK_RESOURCE
@@ -28,7 +35,7 @@ AUTH_TYP = "aa-auth+jwt"
 CONDITIONAL_AUTH_TYP = "aa-conditional-auth+jwt"
 
 Now = Callable[[], float]
-_EDOC_CLAIMS = ("source_agent", "edoc_id", "controllers")
+_EDOC_CLAIMS = ("source_agent", "edoc_id", "controllers", "function_args_hash")
 
 
 def _issue(typ: str, key: SigningKey, claims: dict, lifetime: int, now: Now) -> str:
@@ -80,6 +87,7 @@ def issue_resource_token(
     source_agent: str | None = None,
     edoc_id: str | None = None,
     controllers: list[str] | tuple[str, ...] | None = None,
+    function_args: Mapping | None = None,
     lifetime: int = 300,
     now: Now = time.time,
 ) -> str:
@@ -89,6 +97,15 @@ def issue_resource_token(
     mission-reference claim dict when the agent sent AAuth-Mission (§8.7).
     """
     edocs = _edocs_claims(source_agent, edoc_id, controllers)
+    if edocs:
+        arguments = {} if function_args is None else dict(function_args)
+        canonicalize_function_args(arguments)
+        edocs.update(
+            {
+                "function_args": arguments,
+                "function_args_hash": hash_function_args(arguments),
+            }
+        )
     return _issue(
         RESOURCE_TYP,
         key,
@@ -122,6 +139,7 @@ def issue_auth_token(
     source_agent: str | None = None,
     edoc_id: str | None = None,
     controllers: list[str] | tuple[str, ...] | None = None,
+    function_args_hash: str | None = None,
     key: SigningKey,
     lifetime: int = 3600,
     now: Now = time.time,
@@ -136,6 +154,10 @@ def issue_auth_token(
     if sub is None and scope is None:
         raise ValueError("auth token needs at least one of sub or scope")
     edocs = _edocs_claims(source_agent, edoc_id, controllers)
+    if edocs:
+        edocs["function_args_hash"] = _validate_function_args_hash(
+            function_args_hash or EMPTY_FUNCTION_ARGS_HASH
+        )
     return _issue(
         AUTH_TYP,
         key,
@@ -166,6 +188,7 @@ def issue_conditional_auth_token(
     source_agent: str,
     edoc_id: str,
     controllers: list[str] | tuple[str, ...],
+    function_args_hash: str = EMPTY_FUNCTION_ARGS_HASH,
     prerequisite: Dataflow,
     key: SigningKey,
     lifetime: int = 3600,
@@ -179,6 +202,7 @@ def issue_conditional_auth_token(
     if not isinstance(prerequisite, Dataflow):
         raise ValueError("prerequisite must be a Dataflow")
     edocs = _edocs_claims(source_agent, edoc_id, controllers)
+    edocs["function_args_hash"] = _validate_function_args_hash(function_args_hash)
     return _issue(
         CONDITIONAL_AUTH_TYP,
         key,
@@ -230,19 +254,22 @@ def verify_resource_token(
     scope: str | None = None,
     edoc_id: str | None = None,
     controllers: list[str] | tuple[str, ...] | None = None,
+    function_args_hash: str | None = None,
     now: Now = time.time,
 ) -> dict:
     """PS/AS-side resource token verification (§6.7.2). `aud` is the
     recipient's own identifier; other expected bindings are checked when given."""
     claims = _decode(token, key_resolver, RESOURCE_TYP, now)
-    _validate_edocs_claims(claims)
+    _validate_edocs_claims(claims, require_full_args=True)
     if claims.get("aud") != aud:
         raise AAuthError(INVALID_TOKEN, detail=f"resource token aud is {claims.get('aud')}, not us")
     if agent is not None and claims.get("agent") != agent:
         raise AAuthError(INVALID_TOKEN, detail="resource token agent mismatch")
     if agent_jkt is not None and claims.get("agent_jkt") != agent_jkt:
         raise AAuthError(INVALID_TOKEN, detail="resource token agent_jkt mismatch")
-    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
+    _check_edocs_bindings(
+        claims, source_agent, scope, edoc_id, controllers, function_args_hash
+    )
     return claims
 
 
@@ -287,6 +314,7 @@ def verify_auth_token(
     scope: str | None = None,
     edoc_id: str | None = None,
     controllers: list[str] | tuple[str, ...] | None = None,
+    function_args_hash: str | None = None,
     now: Now = time.time,
 ) -> dict:
     """Resource-side auth token verification (§9.4.3, simplified): typ, an
@@ -302,7 +330,9 @@ def verify_auth_token(
         raise AAuthError(INVALID_TOKEN, detail="auth token has neither sub nor scope")
     if signing_jwk is not None:
         _check_cnf(claims, signing_jwk)
-    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
+    _check_edocs_bindings(
+        claims, source_agent, scope, edoc_id, controllers, function_args_hash
+    )
     return claims
 
 
@@ -318,8 +348,9 @@ def verify_conditional_auth_token(
     scope: str,
     edoc_id: str,
     controllers: list[str] | tuple[str, ...],
+    function_args_hash: str = EMPTY_FUNCTION_ARGS_HASH,
     now: Now = time.time,
-) -> Dataflow:
+) -> DataflowBinding:
     """Sentinel-side verification of one controller AS's conditional approval."""
     claims = _decode(token, key_resolver, CONDITIONAL_AUTH_TYP, now)
     _validate_edocs_claims(claims)
@@ -332,7 +363,14 @@ def verify_conditional_auth_token(
     if claims.get("agent") != agent:
         raise AAuthError(INVALID_TOKEN, detail="conditional token agent mismatch")
     _check_cnf(claims, signing_jwk)
-    _check_edocs_bindings(claims, source_agent, scope, edoc_id, controllers)
+    _check_edocs_bindings(
+        claims,
+        source_agent,
+        scope,
+        edoc_id,
+        controllers,
+        function_args_hash,
+    )
     return _decode_dataflow(claims.get("prerequisite"))
 
 
@@ -348,26 +386,35 @@ def _encode_dataflow(dataflow: Dataflow) -> dict:
         "function": dataflow.function,
         "document": dataflow.document,
         "destination": dataflow.destination,
+        "function_args_hash": dataflow.function_args_hash,
     }
     if any(not isinstance(item, str) or not item for item in value.values()):
         raise ValueError("prerequisite Dataflow fields must be non-empty strings")
     return value
 
 
-def _decode_dataflow(value: object) -> Dataflow:
-    fields = {"source", "function", "document", "destination"}
+def _decode_dataflow(value: object) -> DataflowBinding:
+    fields = {
+        "source",
+        "function",
+        "document",
+        "destination",
+        "function_args_hash",
+    }
     if not isinstance(value, dict) or set(value) != fields:
         raise AAuthError(
             INVALID_TOKEN,
-            detail="conditional token prerequisite must contain exactly source, function, document, and destination",
+            detail="conditional token prerequisite has the wrong fields",
         )
     if any(not isinstance(value[name], str) or not value[name] for name in fields):
         raise AAuthError(INVALID_TOKEN, detail="conditional token prerequisite fields must be non-empty strings")
-    return Dataflow(
+    _validate_function_args_hash(value["function_args_hash"])
+    return DataflowBinding(
         source=value["source"],
         function=value["function"],
         document=value["document"],
         destination=value["destination"],
+        function_args_hash=value["function_args_hash"],
     )
 
 
@@ -398,7 +445,7 @@ def _edocs_claims(
     }
 
 
-def _validate_edocs_claims(claims: dict) -> None:
+def _validate_edocs_claims(claims: dict, *, require_full_args: bool = False) -> None:
     if not any(name in claims for name in _EDOC_CLAIMS):
         return
     if not all(name in claims for name in _EDOC_CLAIMS):
@@ -407,8 +454,27 @@ def _validate_edocs_claims(claims: dict) -> None:
         raise AAuthError(INVALID_TOKEN, detail="token controllers claim must be a JSON list")
     try:
         _edocs_claims(claims["source_agent"], claims["edoc_id"], claims["controllers"])
+        _validate_function_args_hash(claims["function_args_hash"])
     except ValueError as error:
         raise AAuthError(INVALID_TOKEN, detail=f"invalid eDocs claims: {error}") from error
+    if require_full_args:
+        arguments = claims.get("function_args")
+        if not isinstance(arguments, dict):
+            raise AAuthError(
+                INVALID_TOKEN,
+                detail="eDocs resource token function_args must be a JSON object",
+            )
+        try:
+            actual = hash_function_args(arguments)
+        except ValueError as error:
+            raise AAuthError(
+                INVALID_TOKEN, detail=f"invalid function_args: {error}"
+            ) from error
+        if actual != claims["function_args_hash"]:
+            raise AAuthError(
+                INVALID_TOKEN,
+                detail="resource token function_args_hash does not match function_args",
+            )
 
 
 def _check_edocs_bindings(
@@ -417,13 +483,29 @@ def _check_edocs_bindings(
     scope: str | None,
     edoc_id: str | None,
     controllers: list[str] | tuple[str, ...] | None,
+    function_args_hash: str | None,
 ) -> None:
     expected = {
         "source_agent": source_agent,
         "scope": scope,
         "edoc_id": edoc_id,
         "controllers": list(controllers) if controllers is not None else None,
+        "function_args_hash": function_args_hash,
     }
     for name, value in expected.items():
         if value is not None and claims.get(name) != value:
             raise AAuthError(INVALID_TOKEN, detail=f"token {name} mismatch")
+
+
+def _validate_function_args_hash(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value.startswith("sha256:")
+        or len(value) != len("sha256:") + 64
+    ):
+        raise ValueError("function_args_hash must be a sha256 digest")
+    try:
+        int(value.removeprefix("sha256:"), 16)
+    except ValueError as error:
+        raise ValueError("function_args_hash must be a sha256 digest") from error
+    return value

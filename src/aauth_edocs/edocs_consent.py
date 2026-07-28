@@ -5,9 +5,10 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from .coordinator import ApprovalRequired
+from .edocs import hash_function_args
 from .errors import AAuthError, INVALID_REQUEST, INVALID_TOKEN
 
 
@@ -23,6 +24,8 @@ class EdocsApprovalRequest:
     resource: str
     authorization_audience: str
     approval_url: str
+    function_args: dict[str, Any]
+    function_args_hash: str
 
 
 class EdocsConsentClient:
@@ -155,10 +158,31 @@ class EdocsConsentClient:
                 detail="consent review has invalid eDocs controllers",
             )
 
+        function_args = claims.get("function_args")
+        function_args_hash = claims.get("function_args_hash")
+        if not isinstance(function_args, dict) or not isinstance(
+            function_args_hash, str
+        ):
+            raise AAuthError(
+                INVALID_TOKEN,
+                detail="consent review has invalid function arguments",
+            )
+        try:
+            actual_hash = hash_function_args(function_args)
+        except ValueError as error:
+            raise AAuthError(INVALID_TOKEN, detail=str(error)) from error
+        if actual_hash != function_args_hash:
+            raise AAuthError(
+                INVALID_TOKEN,
+                detail="consent review function arguments do not match their digest",
+            )
+
         return EdocsApprovalRequest(
             **fields,
             controllers=tuple(controllers),
             approval_url=EdocsConsentClient._approval_url(approval),
+            function_args=dict(function_args),
+            function_args_hash=function_args_hash,
         )
 
     async def _get_async(self, url: str):

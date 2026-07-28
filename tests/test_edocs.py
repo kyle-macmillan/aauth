@@ -2,7 +2,17 @@ from dataclasses import FrozenInstanceError, fields
 
 import pytest
 
-from aauth_edocs import Dataflow, ExactRule, FunctionDescriptor, ResourceBinding, SentinelRegistry
+from aauth_edocs import (
+    MAX_FUNCTION_ARGS_BYTES,
+    Dataflow,
+    ExactRule,
+    FunctionDescriptor,
+    ResourceBinding,
+    SentinelRegistry,
+    canonicalize_function_args,
+    hash_function_args,
+    validate_function_args,
+)
 
 
 def _flow(**changes) -> Dataflow:
@@ -24,6 +34,57 @@ def test_dataflow_is_an_immutable_exact_tuple():
     assert flow in {flow}
     with pytest.raises(FrozenInstanceError):
         flow.document = "doc-456"
+
+
+def test_function_arguments_are_canonical_and_part_of_exact_dataflow():
+    first = Dataflow.from_arguments("a", "f", "d", "b", {"z": 1, "nested": {"b": 2, "a": 1}})
+    reordered = Dataflow.from_arguments("a", "f", "d", "b", {"nested": {"a": 1, "b": 2}, "z": 1})
+    changed = Dataflow.from_arguments("a", "f", "d", "b", {"nested": {"a": 1, "b": 3}, "z": 1})
+
+    assert first == reordered
+    assert first.function_args == {"nested": {"a": 1, "b": 2}, "z": 1}
+    assert first.function_args_hash == reordered.function_args_hash
+    assert first != changed
+    assert first.function_args_hash != changed.function_args_hash
+
+
+def test_empty_function_arguments_are_supported():
+    assert canonicalize_function_args() == b"{}"
+    assert hash_function_args() == hash_function_args({})
+    assert Dataflow("a", "f", "d", "b") == Dataflow.from_arguments("a", "f", "d", "b", {})
+
+
+@pytest.mark.parametrize("arguments", [[], {"bad": float("nan")}, {"bad": object()}])
+def test_non_json_function_arguments_are_rejected(arguments):
+    with pytest.raises(ValueError, match="function arguments"):
+        canonicalize_function_args(arguments)
+
+
+def test_function_arguments_have_a_size_limit():
+    with pytest.raises(ValueError, match="exceed"):
+        canonicalize_function_args({"value": "x" * MAX_FUNCTION_ARGS_BYTES})
+
+
+def test_function_descriptor_validates_arbitrary_json_object_schema():
+    descriptor = FunctionDescriptor(
+        id="search@1",
+        description="Search text",
+        implementation_uri="https://functions.example/search.py",
+        digest="sha256:abc123",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    )
+
+    validate_function_args(descriptor, {"query": "termination", "limit": 20})
+    with pytest.raises(ValueError, match="input schema"):
+        validate_function_args(descriptor, {"query": "termination", "limit": 0})
 
 
 def test_exact_rule_matches_only_its_complete_dataflow():

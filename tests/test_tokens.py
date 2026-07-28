@@ -3,6 +3,7 @@ import pytest
 from aauth_edocs import (
     AAuthError,
     Dataflow,
+    hash_function_args,
     check_resource_challenge,
     issue_agent_token,
     issue_auth_token,
@@ -328,6 +329,7 @@ def test_conditional_and_normal_auth_types_are_not_interchangeable(
 
 
 def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver):
+    function_args = {"query": "termination", "limit": 20}
     token = issue_resource_token(
         issuer=RESOURCE,
         aud=PS,
@@ -337,6 +339,7 @@ def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver
         source_agent=EDOC_SOURCE,
         edoc_id=EDOC_ID,
         controllers=EDOC_CONTROLLERS,
+        function_args=function_args,
         key=resource_key,
     )
 
@@ -350,10 +353,13 @@ def test_edocs_resource_token_roundtrip(resource_key, agent_key, agent, resolver
         scope="identity@1",
         edoc_id=EDOC_ID,
         controllers=EDOC_CONTROLLERS,
+        function_args_hash=hash_function_args({"limit": 20, "query": "termination"}),
     )
     assert claims["source_agent"] == EDOC_SOURCE
     assert claims["edoc_id"] == EDOC_ID
     assert claims["controllers"] == list(EDOC_CONTROLLERS)
+    assert claims["function_args"] == function_args
+    assert claims["function_args_hash"] == hash_function_args(function_args)
 
 
 def test_edocs_auth_token_roundtrip(ps_key, agent_key, agent, resolver):
@@ -517,4 +523,35 @@ def test_signed_non_list_controllers_rejected(resource_key, agent_key, agent, re
     )
 
     with pytest.raises(AAuthError, match="JSON list"):
+        verify_resource_token(malformed, resolver, aud=PS)
+
+
+def test_signed_resource_token_rejects_arguments_digest_mismatch(
+    resource_key, agent_key, agent, resolver
+):
+    from joserfc import jwt as joserfc_jwt
+    from joserfc.jwk import OKPKey
+
+    token = issue_resource_token(
+        issuer=RESOURCE,
+        aud=PS,
+        agent=agent,
+        agent_jkt=agent_key.thumbprint,
+        scope="search@1",
+        source_agent=EDOC_SOURCE,
+        edoc_id=EDOC_ID,
+        controllers=EDOC_CONTROLLERS,
+        function_args={"query": "approved"},
+        key=resource_key,
+    )
+    header, claims = peek_jwt(token)
+    claims["function_args"] = {"query": "changed"}
+    malformed = joserfc_jwt.encode(
+        header,
+        claims,
+        OKPKey.import_key(resource_key.private_jwk()),
+        algorithms=["EdDSA"],
+    )
+
+    with pytest.raises(AAuthError, match="does not match function_args"):
         verify_resource_token(malformed, resolver, aud=PS)

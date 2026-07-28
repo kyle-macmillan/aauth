@@ -5,6 +5,7 @@ import pytest
 from aauth_edocs import (
     AAuthError,
     ApprovalRequired,
+    EMPTY_FUNCTION_ARGS_HASH,
     EdocsApprovalHandler,
     EdocsApprovalRequest,
     EdocsConsentClient,
@@ -33,6 +34,8 @@ def review_body():
         "source_agent": "aauth:source@ap.example",
         "edoc_id": "doc-123",
         "controllers": ["https://as-a.example", "https://as-b.example"],
+        "function_args": {},
+        "function_args_hash": EMPTY_FUNCTION_ARGS_HASH,
     }
     return {
         "agent": claims["agent"],
@@ -71,6 +74,8 @@ def test_returns_typed_ps_verified_edocs_review():
         resource="https://resource.example",
         authorization_audience="https://sentinel.example",
         approval_url=APPROVAL_URL,
+        function_args={},
+        function_args_hash=EMPTY_FUNCTION_ARGS_HASH,
     )
 
 
