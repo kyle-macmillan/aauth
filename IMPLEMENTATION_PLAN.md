@@ -686,7 +686,7 @@ before every commit or push.
 - `mcp-aauth-codex`, branch `main`:
   - `5f9d97b` adds proactive authorization, opaque eDoc routing, the resource
     function-loader boundary, DuckDB setup/execution, and integration tests.
-- `python-sdk`, branch `aauth-auth-middleware-hook`, remains unchanged and is
+- `mcp-python-sdk`, branch `aauth-auth-middleware-hook`, remains unchanged and is
   consumed from the local fork.
 - `eDocs-research` and all LaTeX-related material remain untouched.
 
@@ -727,9 +727,7 @@ derived outputs, and multiple agent sessions
   - Remains unchanged in this session.
 - `mcp-edocs-provider`
   - Branch: `main`.
-  - New standalone local repository created this session.
-  - It currently has no Git remote. It must be given a remote before it can
-    be pushed.
+  - Remote: `origin` (`kyle-macmillan/mcp-edocs-provider`).
   - Owns reusable provider catalogs, function loaders/registries, protected
     provider execution, provider binding, and MCP/HTTP construction.
 - `mcp-aauth-codex`
