@@ -827,7 +827,7 @@ The Sentinel tab shows:
 - authoritative controllers;
 - registered functions and actual SQL/artifacts;
 - materialized dataflows; and
-- registered derived eDocs with producer provenance and output digests.
+- registered derived eDocs with dataflow provenance and output digests.
 
 Routine Werkzeug and Uvicorn access logs are disabled so background HTTP
 traffic does not overwrite the Codex terminal UI. Warnings and errors remain
@@ -870,13 +870,13 @@ The recorder creates a `DerivedEdoc` containing:
 
 - a unique opaque `derived_...` ID;
 - an `edoc://derived/...` URI;
-- the exact producer dataflow;
-- a stable producer fingerprint;
+- the exact dataflow;
+- a stable dataflow fingerprint;
 - an output content digest;
-- the producer destination as custodian; and
+- the dataflow destination as possessor; and
 - inherited controllers.
 
-`Dataflow.document` can now contain `OutputOf(exact_producer)` in controller
+`Dataflow.document` can now contain `OutputOf(exact_dataflow)` in controller
 policy. The selector can be created before any output exists. A
 `MutableControllerPolicy` resolves a later concrete derived ID through trusted
 provenance and matches the other exact dataflow fields.
@@ -886,7 +886,7 @@ Alice's seeded policies are:
 ```text
 Alice source → query_table@1(employee directory, engineering args) → Codex
 
-Any output of the exact producer above may flow as:
+Any output of the exact dataflow above may flow as:
 Codex → identity@1(derived output) → Carol
 ```
 

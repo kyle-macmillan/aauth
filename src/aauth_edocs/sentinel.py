@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Any, Callable
 
-from flask import Flask, request
+from flask import Flask, jsonify, request
 
 from .agent import RequestsTransport
-from .edocs import Dataflow, SentinelRegistry
+from .edocs import (
+    Dataflow,
+    FunctionDescriptor,
+    ResourceBinding,
+    SentinelRegistry,
+    register_materialization,
+)
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
 from .httpsig import HttpRequest, KeyResolver, peek_jwt, sign_server, verify
 from .ids import DWK_ACCESS, DWK_PERSON
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata, fetch_metadata
+from .policy_json import parse_dataflow, serialize_dataflow
 from .tokens import (
     AUTH_TYP,
     CONDITIONAL_AUTH_TYP,
@@ -25,6 +32,7 @@ from .tokens import (
 )
 
 Now = Callable[[], float]
+FunctionRegister = Callable[[dict[str, Any]], Any]
 
 
 def create_sentinel(
@@ -36,8 +44,9 @@ def create_sentinel(
     app: Flask | None = None,
     token_path: str = "/token",
     jwks_path: str = "/jwks.json",
+    on_function_register: FunctionRegister | None = None,
 ) -> Flask:
-    """Create the Sentinel's AS-facing and PS-facing HTTP adapter."""
+    """Create the Sentinel's AS-facing, PS-facing, and registry HTTP adapter."""
     app = app or Flask("aauth-sentinel")
     key = key or SigningKey.generate(kid="sentinel")
     transport = transport or RequestsTransport()
@@ -51,6 +60,15 @@ def create_sentinel(
     @app.errorhandler(AAuthError)
     def aauth_error(error: AAuthError):
         return error.body(), error.status
+
+    @app.errorhandler(LookupError)
+    def not_found(error):
+        return jsonify(error="not_found", detail=str(error)), 404
+
+    @app.errorhandler(ValueError)
+    @app.errorhandler(TypeError)
+    def invalid_request(error):
+        return jsonify(error="invalid_request", detail=str(error)), 400
 
     @app.get("/.well-known/aauth-access.json")
     def access_metadata():
@@ -190,7 +208,254 @@ def create_sentinel(
             registry.controllers[controller_key] = authoritative
         return {"auth_token": token, "expires_in": 3600}
 
+    def _public_function(descriptor: FunctionDescriptor) -> dict[str, Any]:
+        return {
+            "function_id": descriptor.id,
+            "description": descriptor.description,
+            "input_schema": descriptor.input_schema,
+            "digest": descriptor.digest,
+        }
+
+    @app.get("/registry")
+    def registry_state():
+        return jsonify(
+            {
+                "resource_bindings": [
+                    {
+                        "source_agent": source,
+                        "source_ps": binding.source_ps,
+                        "resource_issuer": binding.resource_issuer,
+                        "resource_jkt": binding.resource_jkt,
+                    }
+                    for source, binding in registry.resource_bindings.items()
+                ],
+                "controllers": [
+                    {
+                        "resource_issuer": resource_issuer,
+                        "edoc_id": edoc_id,
+                        "controllers": list(controllers),
+                    }
+                    for (
+                        resource_issuer,
+                        edoc_id,
+                    ), controllers in registry.controllers.items()
+                ],
+                "functions": [
+                    {
+                        **_public_function(descriptor),
+                        "implementation_uri": descriptor.implementation_uri,
+                    }
+                    for descriptor in sorted(
+                        registry.functions.values(),
+                        key=lambda item: item.id,
+                    )
+                ],
+                "materialized": [
+                    serialize_dataflow(flow)
+                    for flow in sorted(
+                        registry.materialized,
+                        key=lambda flow: (
+                            flow.source,
+                            flow.document,
+                            flow.function_args_hash,
+                        ),
+                    )
+                ],
+                "derived_documents": [
+                    {
+                        "edoc_id": derived.edoc_id,
+                        "resource_uri": derived.resource_uri,
+                        "dataflow": serialize_dataflow(derived.dataflow),
+                        "dataflow_fingerprint": derived.dataflow_fingerprint,
+                        "output_digest": derived.output_digest,
+                        "possessor": derived.possessor,
+                        "controllers": list(derived.controllers),
+                        "published": derived.edoc_id in registry.published_derived,
+                    }
+                    for derived in registry.derived_documents.values()
+                ],
+            }
+        )
+
+    @app.post("/registry/bindings")
+    def register_binding():
+        body = _json_object()
+        required = {
+            "source_agent",
+            "source_ps",
+            "resource_issuer",
+            "resource_jkt",
+        }
+        if set(body) != required:
+            raise ValueError(
+                "binding requires source_agent, source_ps, "
+                "resource_issuer, and resource_jkt"
+            )
+        for field in required:
+            if not isinstance(body[field], str) or not body[field]:
+                raise ValueError(f"{field} must be a non-empty string")
+        source_agent = body["source_agent"]
+        existing = registry.resource_bindings.get(source_agent)
+        binding = ResourceBinding(
+            source_ps=body["source_ps"],
+            resource_issuer=body["resource_issuer"],
+            resource_jkt=body["resource_jkt"],
+        )
+        if existing is not None and existing != binding:
+            raise ValueError(
+                f"source_agent already bound to a different resource: {source_agent}"
+            )
+        registry.resource_bindings[source_agent] = binding
+        return jsonify(
+            {
+                "binding": {
+                    "source_agent": source_agent,
+                    "source_ps": binding.source_ps,
+                    "resource_issuer": binding.resource_issuer,
+                    "resource_jkt": binding.resource_jkt,
+                }
+            }
+        ), 201
+
+    @app.post("/registry/controllers")
+    def register_controllers():
+        body = _json_object()
+        if set(body) != {"resource_issuer", "edoc_id", "controllers"}:
+            raise ValueError(
+                "controller registration requires resource_issuer, "
+                "edoc_id, and controllers"
+            )
+        resource_issuer = body["resource_issuer"]
+        edoc_id = body["edoc_id"]
+        controllers = body["controllers"]
+        if not isinstance(resource_issuer, str) or not resource_issuer:
+            raise ValueError("resource_issuer must be a non-empty string")
+        if not isinstance(edoc_id, str) or not edoc_id:
+            raise ValueError("edoc_id must be a non-empty string")
+        if (
+            not isinstance(controllers, list)
+            or not controllers
+            or any(not isinstance(item, str) or not item for item in controllers)
+        ):
+            raise ValueError("controllers must be a non-empty string list")
+        controller_key = (resource_issuer, edoc_id)
+        controller_tuple = tuple(controllers)
+        existing = registry.controllers.get(controller_key)
+        if existing is not None and existing != controller_tuple:
+            raise ValueError(
+                "controllers already registered for this eDoc with a different set"
+            )
+        derived = registry.derived_documents.get(edoc_id)
+        if derived is not None and tuple(derived.controllers) != controller_tuple:
+            raise ValueError(
+                "controllers must match the inherited derived eDoc controllers"
+            )
+        registry.controllers[controller_key] = controller_tuple
+        if edoc_id in registry.derived_documents:
+            registry.published_derived.add(edoc_id)
+        return jsonify(
+            {
+                "controller": {
+                    "resource_issuer": resource_issuer,
+                    "edoc_id": edoc_id,
+                    "controllers": list(controller_tuple),
+                }
+            }
+        ), 201
+
+    @app.get("/registry/derived/<edoc_id>")
+    def get_derived(edoc_id: str):
+        derived = registry.derived_documents.get(edoc_id)
+        if derived is None:
+            raise LookupError(f"unknown derived eDoc: {edoc_id}")
+        output = registry.derived_outputs.get(edoc_id)
+        if output is None:
+            raise LookupError(f"derived eDoc output unavailable: {edoc_id}")
+        return jsonify(
+            {
+                "edoc_id": derived.edoc_id,
+                "possessor": derived.possessor,
+                "controllers": list(derived.controllers),
+                "output_digest": derived.output_digest,
+                "dataflow": serialize_dataflow(derived.dataflow),
+                "dataflow_fingerprint": derived.dataflow_fingerprint,
+                "output": output,
+                "published": edoc_id in registry.published_derived,
+            }
+        )
+
+    @app.post("/registry/materializations")
+    def record_materialization():
+        body = _json_object()
+        if set(body) != {"dataflow", "output", "controllers"}:
+            raise ValueError(
+                "materialization requires dataflow, output, and controllers"
+            )
+        if not isinstance(body["output"], dict):
+            raise ValueError("output must be a JSON object")
+        controllers = body["controllers"]
+        if (
+            not isinstance(controllers, list)
+            or not controllers
+            or any(not isinstance(item, str) or not item for item in controllers)
+        ):
+            raise ValueError("controllers must be a non-empty string list")
+        dataflow = parse_dataflow(body["dataflow"])
+        derived = register_materialization(
+            registry,
+            dataflow=dataflow,
+            output=body["output"],
+            controllers=tuple(controllers),
+        )
+        return jsonify(
+            {
+                "derived_edoc_id": derived.edoc_id,
+                "possessor": derived.possessor,
+                "controllers": list(derived.controllers),
+            }
+        ), 201
+
+    @app.get("/registry/functions")
+    def list_functions():
+        return jsonify(
+            {
+                "functions": [
+                    _public_function(descriptor)
+                    for descriptor in sorted(
+                        registry.functions.values(),
+                        key=lambda item: item.id,
+                    )
+                ]
+            }
+        )
+
+    @app.post("/registry/functions")
+    def register_function():
+        if on_function_register is None:
+            raise ValueError("function registration is not configured")
+        body = _json_object()
+        result = on_function_register(body)
+        descriptor = getattr(result, "descriptor", result)
+        if not isinstance(descriptor, FunctionDescriptor):
+            raise ValueError("function registration returned no descriptor")
+        registry.functions[descriptor.id] = descriptor
+        return jsonify(
+            {
+                "function": {
+                    **_public_function(descriptor),
+                    "implementation_uri": descriptor.implementation_uri,
+                }
+            }
+        ), 201
+
     return app
+
+
+def _json_object() -> dict[str, Any]:
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ValueError("JSON object required")
+    return body
 
 
 def aggregate_controller_decisions(

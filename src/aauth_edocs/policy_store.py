@@ -107,7 +107,7 @@ class MutableControllerPolicy:
         derived = self._derived_resolver(proposal.document)
         return (
             derived is not None
-            and derived.producer == selector.producer
+            and derived.dataflow == selector.dataflow
             and rule.dataflow.source == proposal.source
             and rule.dataflow.function == proposal.function
             and rule.dataflow.destination == proposal.destination

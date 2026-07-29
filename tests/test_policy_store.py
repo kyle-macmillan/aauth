@@ -114,7 +114,7 @@ def test_future_output_rule_matches_only_after_trusted_materialization():
     assert policy.evaluate(unknown) is None
     derived = register_materialization(
         registry,
-        producer=producer,
+        dataflow=producer,
         output={"rows": [{"value": 1}]},
         controllers=("https://alice-as.example",),
     )

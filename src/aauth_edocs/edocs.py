@@ -102,20 +102,20 @@ class Dataflow:
 class OutputOf:
     """Select any derived eDoc produced by one exact future dataflow."""
 
-    producer: Dataflow
+    dataflow: Dataflow
 
     def __post_init__(self) -> None:
-        if not isinstance(self.producer.document, str):
-            raise ValueError("output producer must reference a concrete eDoc")
+        if not isinstance(self.dataflow.document, str):
+            raise ValueError("output dataflow must reference a concrete eDoc")
 
     @property
     def fingerprint(self) -> str:
         value = {
-            "source": self.producer.source,
-            "function": self.producer.function,
-            "document": self.producer.document,
-            "destination": self.producer.destination,
-            "function_args_hash": self.producer.function_args_hash,
+            "source": self.dataflow.source,
+            "function": self.dataflow.function,
+            "document": self.dataflow.document,
+            "destination": self.dataflow.destination,
+            "function_args_hash": self.dataflow.function_args_hash,
         }
         encoded = json.dumps(
             value,
@@ -130,9 +130,9 @@ class DerivedEdoc:
     """Trusted provenance metadata for one materialized function output."""
 
     edoc_id: str
-    producer: Dataflow
+    dataflow: Dataflow
     output_digest: str
-    custodian: str
+    possessor: str
     controllers: tuple[str, ...]
 
     @property
@@ -140,8 +140,8 @@ class DerivedEdoc:
         return f"edoc://derived/{self.edoc_id}"
 
     @property
-    def producer_fingerprint(self) -> str:
-        return OutputOf(self.producer).fingerprint
+    def dataflow_fingerprint(self) -> str:
+        return OutputOf(self.dataflow).fingerprint
 
 
 @dataclass(frozen=True, eq=False)
@@ -246,12 +246,14 @@ class SentinelRegistry:
     functions: dict[str, FunctionDescriptor] = field(default_factory=dict)
     materialized: set[Dataflow] = field(default_factory=set)
     derived_documents: dict[str, DerivedEdoc] = field(default_factory=dict)
+    derived_outputs: dict[str, Any] = field(default_factory=dict)
+    published_derived: set[str] = field(default_factory=set)
 
 
 def register_materialization(
     registry: SentinelRegistry,
     *,
-    producer: Dataflow,
+    dataflow: Dataflow,
     output: Any,
     controllers: tuple[str, ...],
 ) -> DerivedEdoc:
@@ -265,11 +267,12 @@ def register_materialization(
     ).encode()
     derived = DerivedEdoc(
         edoc_id=f"derived_{uuid4().hex}",
-        producer=producer,
+        dataflow=dataflow,
         output_digest=f"sha256:{hashlib.sha256(encoded).hexdigest()}",
-        custodian=producer.destination,
+        possessor=dataflow.destination,
         controllers=controllers,
     )
-    registry.materialized.add(producer)
+    registry.materialized.add(dataflow)
     registry.derived_documents[derived.edoc_id] = derived
+    registry.derived_outputs[derived.edoc_id] = output
     return derived

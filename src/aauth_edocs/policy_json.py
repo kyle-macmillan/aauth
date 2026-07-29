@@ -13,7 +13,7 @@ def serialize_dataflow(dataflow: Dataflow) -> dict[str, Any]:
         "source": dataflow.source,
         "function": dataflow.function,
         "document": (
-            {"output_of": serialize_dataflow(dataflow.document.producer)}
+            {"output_of": serialize_dataflow(dataflow.document.dataflow)}
             if isinstance(dataflow.document, OutputOf)
             else dataflow.document
         ),
