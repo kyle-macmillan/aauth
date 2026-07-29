@@ -33,6 +33,7 @@ from .tokens import (
 
 Now = Callable[[], float]
 FunctionRegister = Callable[[dict[str, Any]], Any]
+ExecuteFunction = Callable[[str, dict[str, Any], dict[str, Any]], dict[str, Any]]
 
 
 def create_sentinel(
@@ -45,6 +46,7 @@ def create_sentinel(
     token_path: str = "/token",
     jwks_path: str = "/jwks.json",
     on_function_register: FunctionRegister | None = None,
+    execute_function: ExecuteFunction | None = None,
 ) -> Flask:
     """Create the Sentinel's AS-facing, PS-facing, and registry HTTP adapter."""
     app = app or Flask("aauth-sentinel")
@@ -64,6 +66,10 @@ def create_sentinel(
     @app.errorhandler(LookupError)
     def not_found(error):
         return jsonify(error="not_found", detail=str(error)), 404
+
+    @app.errorhandler(PermissionError)
+    def forbidden(error):
+        return jsonify(error="forbidden", detail=str(error)), 403
 
     @app.errorhandler(ValueError)
     @app.errorhandler(TypeError)
@@ -383,6 +389,66 @@ def create_sentinel(
                 "published": edoc_id in registry.published_derived,
             }
         )
+
+    @app.post("/registry/derived/<edoc_id>/transform")
+    def transform_derived(edoc_id: str):
+        """Apply one registry function locally and record source=destination provenance."""
+        if execute_function is None:
+            raise ValueError("local transform is not configured")
+        body = _json_object()
+        if set(body) != {"possessor", "function_id", "function_args"}:
+            raise ValueError(
+                "transform requires possessor, function_id, and function_args"
+            )
+        possessor = body["possessor"]
+        function_id = body["function_id"]
+        function_args = body["function_args"]
+        if not isinstance(possessor, str) or not possessor:
+            raise ValueError("possessor must be a non-empty string")
+        if not isinstance(function_id, str) or not function_id:
+            raise ValueError("function_id must be a non-empty string")
+        if not isinstance(function_args, dict):
+            raise ValueError("function_args must be a JSON object")
+        derived = registry.derived_documents.get(edoc_id)
+        if derived is None:
+            raise LookupError(f"unknown derived eDoc: {edoc_id}")
+        if derived.possessor != possessor:
+            raise PermissionError(
+                "only the possessor agent may transform this derived eDoc"
+            )
+        if edoc_id in registry.published_derived:
+            raise ValueError("derived eDoc is already published")
+        if function_id not in registry.functions:
+            raise LookupError(f"unknown function: {function_id}")
+        output = registry.derived_outputs.get(edoc_id)
+        if output is None:
+            raise LookupError(f"derived eDoc output unavailable: {edoc_id}")
+        if not isinstance(output, dict):
+            raise RuntimeError(f"derived eDoc payload is invalid: {edoc_id}")
+        transformed = execute_function(function_id, output, function_args)
+        if not isinstance(transformed, dict):
+            raise ValueError("transform function must return a JSON object")
+        dataflow = Dataflow.from_arguments(
+            possessor,
+            function_id,
+            edoc_id,
+            possessor,
+            function_args,
+        )
+        created = register_materialization(
+            registry,
+            dataflow=dataflow,
+            output=transformed,
+            controllers=derived.controllers,
+        )
+        return jsonify(
+            {
+                "derived_edoc_id": created.edoc_id,
+                "possessor": created.possessor,
+                "controllers": list(created.controllers),
+                "output": transformed,
+            }
+        ), 201
 
     @app.post("/registry/materializations")
     def record_materialization():
