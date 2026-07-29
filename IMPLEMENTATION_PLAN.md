@@ -982,12 +982,8 @@ The next implementation slice is confined to
 
 ### 16.11 Deferred work
 
-- Derived eDocs are tracked by the Sentinel demo registry but are not yet
-  served by a dedicated derived-resource MCP endpoint.
-- Provider execution still has one configured destination identity; dynamic
-  destination handling is deferred.
-- Therefore Carol and Bob cannot yet perform the final live
-  allow-versus-deny derived-output invocation in their separate windows.
 - Replace the in-process materialization callback with a signed execution
   receipt before treating this as a production trust boundary.
+- Direct-input lineage (`input_edoc_ids`) for transitive controller retention
+  remains deferred per §16.10.
 - Assign a Git remote to `mcp-edocs-provider`, then push its `main` branch.
