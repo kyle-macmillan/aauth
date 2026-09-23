@@ -130,9 +130,9 @@ def create_as(
         if granted is None:
             raise AAuthError("denied", 403, "resource policy denied the request")
         if isinstance(granted, dict):
-            return _defer(granted, context)
+            return _defer_policy_decision(granted, context)
 
-        return _issue(context, granted)
+        return _check_scope_and_issue(context, granted)
 
     @app.get(f"{pending_path}/<pid>", endpoint="aauth_as_pending")
     def pending(pid: str):
@@ -147,17 +147,17 @@ def create_as(
         body = request.get_json(force=True) or {}
         requirement = context["requirement"]
         if requirement == CLAIMS:
-            result = _issue(context, context["rt_claims"].get("scope"), claims=body.get("claims") or {})
+            result = _check_scope_and_issue(context, context["rt_claims"].get("scope"), claims=body.get("claims") or {})
             store.resolve(pid, result)
             return {"status": "recorded"}
         decision = body.get("decision")
         if decision == "grant":
-            store.resolve(pid, _issue(context, context["rt_claims"].get("scope")))
+            store.resolve(pid, _check_scope_and_issue(context, context["rt_claims"].get("scope")))
         else:
             store.deny(pid, detail=f"{requirement} denied")
         return {"status": "recorded"}
 
-    def _defer(policy_result: dict, context: dict):
+    def _defer_policy_decision(policy_result: dict, context: dict):
         requirement = policy_result.get("requirement")
         if requirement == "payment":
             raise AAuthError("payment_required", 402, policy_result.get("detail") or "payment required")
@@ -177,7 +177,9 @@ def create_as(
         response_body.update(body)
         return response_body, status, headers
 
-    def _issue(context: dict, granted_scope: str | None, claims: dict | None = None):
+    def _check_scope_and_issue(context: dict, granted_scope: str | None, claims: dict | None = None):
+        """Checks the granted scope against the resource token's allowed scope
+        and issues an auth token"""
         _check_scope(granted_scope, context["rt_claims"].get("scope"))
         token = issue_auth_token(
             issuer=issuer,
@@ -193,6 +195,7 @@ def create_as(
         return {"auth_token": token, "expires_in": 3600}
 
     def _check_scope(granted: str | None, requested: str | None) -> None:
+        """Checks the granted scope against the resource token's allowed scope"""
         if granted is None:
             return
         if not set(granted.split()) <= set((requested or "").split()):

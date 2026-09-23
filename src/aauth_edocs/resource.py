@@ -1,4 +1,8 @@
-"""Resource-side Flask helpers.
+"""Resource protocol, with a Flask adapter.
+
+The document, JWKS, resource-token, and §6.6 challenge helpers are the
+resource. Flask's `install_resource` and `require_auth_token` are one HTTP
+adapter; other servers (the eDocs provider) call the same helpers.
 
 Identity-based access (§4.1.1): `require_aauth_identity` authenticates the
 caller by agent token alone. Three-/four-party access (§4.1.3/.4):
@@ -11,6 +15,7 @@ beyond scope containment belong in the view (see flask.g.aauth).
 from __future__ import annotations
 
 import functools
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from flask import Flask, g, request
@@ -29,14 +34,86 @@ class ResourceConfig:
 
     issuer: str
     key: SigningKey
-    key_resolver: KeyResolver
+    key_resolver: KeyResolver | None = None
     as_url: str | None = None  # set -> four-party (aud=AS); unset -> three-party (aud=agent's PS)
     default_scope: str = "access"
 
 
+def resource_metadata_document(issuer: str, access_mode: str = "agent-token", **fields) -> dict:
+    """`/.well-known/aauth-resource.json` body for this resource."""
+    return dict(build_metadata(issuer, access_mode=access_mode, **fields))
+
+
+def token_resource_metadata(issuer: str) -> dict:
+    """Metadata for a resource that issues resource tokens."""
+    return resource_metadata_document(
+        issuer,
+        access_mode="auth-token",
+        jwks_uri=f"{issuer}/jwks.json",
+        authorization_endpoint=f"{issuer}/authorize",
+    )
+
+
+def resource_jwks_document(key: SigningKey) -> dict:
+    """`/jwks.json` body for a resource signing key."""
+    return {"keys": [key.public_jwk]}
+
+
+def mint_resource_token(
+    config: ResourceConfig,
+    verified: VerifiedRequest,
+    scope: str,
+    *,
+    aud: str | None = None,
+    source_agent: str | None = None,
+    edoc_id: str | None = None,
+    controllers: list[str] | tuple[str, ...] | None = None,
+    function_args: Mapping | None = None,
+) -> str:
+    """Issue a resource token for the verified agent (§6.2.2).
+
+    `aud` overrides the default audience, which is the resource's AS when it
+    has one, otherwise the agent's declared PS. eDocs resources pass the
+    Sentinel as `aud` and the eDoc claims alongside the scope.
+    """
+    audience = aud or config.as_url or verified.claims.get("ps")
+    if not audience:
+        raise AAuthError(INVALID_REQUEST, 400, "agent has no ps claim and resource has no AS")
+    agent = verified.claims.get("sub")
+    agent_jwk = (verified.claims.get("cnf") or {}).get("jwk")
+    if not isinstance(agent, str) or not isinstance(agent_jwk, dict):
+        raise AAuthError(INVALID_TOKEN, 401, "agent identity is incomplete")
+    return issue_resource_token(
+        issuer=config.issuer,
+        aud=audience,
+        agent=agent,
+        agent_jkt=jwk_thumbprint(agent_jwk),
+        scope=scope,
+        key=config.key,
+        source_agent=source_agent,
+        edoc_id=edoc_id,
+        controllers=controllers,
+        function_args=function_args,
+    )
+
+
+def resource_auth_challenge(
+    config: ResourceConfig,
+    verified: VerifiedRequest,
+    scope: str | None = None,
+    **token_claims,
+) -> tuple[dict, dict[str, str]]:
+    """§6.6 challenge: 401 body plus a requirement carrying a fresh resource token."""
+    token = mint_resource_token(config, verified, scope or config.default_scope, **token_claims)
+    return (
+        AAuthError(INVALID_TOKEN, 401, "auth token required").body(),
+        {REQUIREMENT_HEADER: build_requirement(AUTH_TOKEN, resource_token=token)},
+    )
+
+
 def install_metadata(app: Flask, issuer: str, access_mode: str = "agent-token", **fields) -> None:
     """Serve /.well-known/aauth-resource.json for this resource."""
-    document = dict(build_metadata(issuer, access_mode=access_mode, **fields))
+    document = resource_metadata_document(issuer, access_mode=access_mode, **fields)
 
     @app.get("/.well-known/aauth-resource.json")
     def resource_metadata():
@@ -45,17 +122,17 @@ def install_metadata(app: Flask, issuer: str, access_mode: str = "agent-token", 
 
 def install_resource(app: Flask, config: ResourceConfig) -> None:
     """Metadata + JWKS + authorization endpoint for a token-issuing resource."""
-    install_metadata(
-        app,
-        config.issuer,
-        access_mode="auth-token",
-        jwks_uri=f"{config.issuer}/jwks.json",
-        authorization_endpoint=f"{config.issuer}/authorize",
-    )
+    if config.key_resolver is None:
+        raise ValueError("install_resource requires a key resolver")
+    document = token_resource_metadata(config.issuer)
+
+    @app.get("/.well-known/aauth-resource.json")
+    def resource_metadata():
+        return document
 
     @app.get("/jwks.json")
     def resource_jwks():
-        return {"keys": [config.key.public_jwk]}
+        return resource_jwks_document(config.key)
 
     @app.post("/authorize")
     def authorization_endpoint():
@@ -67,25 +144,9 @@ def install_resource(app: Flask, config: ResourceConfig) -> None:
             scope = (request.get_json(force=True) or {}).get("scope")
             if not scope:
                 raise AAuthError(INVALID_REQUEST, 400, "scope is required")
-            return {"resource_token": _mint_resource_token(config, verified, scope)}
+            return {"resource_token": mint_resource_token(config, verified, scope)}
         except AAuthError as error:
             return error.body(), error.status
-
-
-def _mint_resource_token(config: ResourceConfig, verified: VerifiedRequest, scope: str) -> str:
-    """Issue a resource token for the verified agent (§6.2.2): aud is the
-    resource's AS when it has one, else the agent's declared PS."""
-    aud = config.as_url or verified.claims.get("ps")
-    if not aud:
-        raise AAuthError(INVALID_REQUEST, 400, "agent has no ps claim and resource has no AS")
-    return issue_resource_token(
-        issuer=config.issuer,
-        aud=aud,
-        agent=verified.claims["sub"],
-        agent_jkt=jwk_thumbprint(verified.claims["cnf"]["jwk"]),
-        scope=scope,
-        key=config.key,
-    )
 
 
 def _incoming_request() -> HttpRequest:
@@ -126,6 +187,9 @@ def require_auth_token(config: ResourceConfig, scope: str | None = None):
     -> 401 requirement=agent-token.
     """
 
+    if config.key_resolver is None:
+        raise ValueError("require_auth_token requires a key resolver")
+
     def decorator(view):
         @functools.wraps(view)
         def wrapper(*args, **kwargs):
@@ -144,12 +208,8 @@ def require_auth_token(config: ResourceConfig, scope: str | None = None):
                     g.aauth = verified
                     return view(*args, **kwargs)
                 if typ == AGENT_TYP:  # §6.6: challenge with a fresh resource token
-                    token = _mint_resource_token(config, verified, scope or config.default_scope)
-                    return (
-                        AAuthError(INVALID_TOKEN, 401, "auth token required").body(),
-                        401,
-                        {REQUIREMENT_HEADER: build_requirement(AUTH_TOKEN, resource_token=token)},
-                    )
+                    body, headers = resource_auth_challenge(config, verified, scope)
+                    return body, 401, headers
                 raise AAuthError(INVALID_TOKEN, 401, f"cannot access resource with typ {typ!r}")
             except AAuthError as error:
                 headers = {REQUIREMENT_HEADER: build_requirement(AGENT_TOKEN)} if error.status == 401 else {}

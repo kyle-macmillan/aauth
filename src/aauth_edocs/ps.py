@@ -172,7 +172,7 @@ def create_ps(
             "upstream_claims": upstream_claims,
             "act_agent": act_agent,
         }
-        _check_binding(context)
+        _check_agent_binding(context)
         if _consent_key(context) in consents:
             if rt_claims.get("interaction"):
                 return _defer_interaction(context)
@@ -286,7 +286,7 @@ def create_ps(
                 if context.get("as_pending_url"):
                     _complete_as_pending(pid, context)
                     return {"status": "recorded"}
-                _check_binding(context)
+                _check_agent_binding(context)
                 result = _issue(context)
                 _remember_grant(context)
                 store.resolve(pid, result)
@@ -346,7 +346,7 @@ def create_ps(
             store.deny(pid, detail="resource interaction denied")
         return {"status": "recorded"}
 
-    def _check_binding(context: dict) -> None:
+    def _check_agent_binding(context: dict) -> None:
         bound_person = agent_bindings.get(context["agent_claims"]["sub"])
         if bound_person is not None and bound_person != person:
             raise AAuthError(DENIED, 403, "agent is already bound to another person")
@@ -452,6 +452,15 @@ def create_ps(
         return {"auth_token": auth_token, "expires_in": response.json().get("expires_in", 3600)}
 
     def _handle_as_pending(context: dict, response):
+        """Handles AS's requests for more information.
+        - CLAIMS: The AS is requesting additional identity information of the
+          user (i.e., the person)
+        - INTERACTION: The AS is requesting human-in-the-loop interaction
+        - APPROVAL: The AS is requestion approval from someone other than the
+          user (e.g., Administrator approval, resource owner consent,
+          compliance review, direct user authorization via established
+          communication channel).
+        """
         requirement, params = parse_requirement(response.headers["AAuth-Requirement"])
         as_pending_url = response.headers["Location"]
         if requirement == CLAIMS:
@@ -473,6 +482,9 @@ def create_ps(
         if requirement in (INTERACTION, APPROVAL):
             pid = store.create(retry_after=0)
             if requirement == APPROVAL:
+                # TODO: PS should poll AS for when the AS has gotten consent
+                # from whoever it needs consent from, instead of sending back a
+                # consent. Currently it acts as the consenter itself.
                 params = {**params, "url": f"{issuer}/consent/{pid}"}
             store.set_requirement(pid, build_requirement(requirement, **params))
             relay_context = {**context, "as_pending_url": as_pending_url}
