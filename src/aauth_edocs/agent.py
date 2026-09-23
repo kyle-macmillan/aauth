@@ -218,6 +218,8 @@ class AgentSession:
             body = response.json()
         elif response.status_code == 202:
             location = response.headers["Location"]
+            # testing code: set on_pending only for testing purposes (e.g., for
+            # the agent to call the consent endpoint).
             if self.on_pending:
                 self.on_pending(location, response.headers)
             body = poll(location, self.transport)
