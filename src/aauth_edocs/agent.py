@@ -241,7 +241,8 @@ class AgentSession:
         parameters: dict | None = None,
         mission: dict | None = None,
     ) -> bool:
-        """Ask the PS for permission to perform an action (§7.4-lite)."""
+        """Ask the PS for permission to perform an action not governed by a
+        resource (§7.4-lite)."""
         if not self.ps_url:
             raise AAuthError(INVALID_REQUEST, 400, "agent token has no ps claim — no PS for permission")
         md = fetch_metadata(self.ps_url, DWK_PERSON, self.transport)
