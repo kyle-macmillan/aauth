@@ -1,7 +1,7 @@
 from flask import Flask
 
 from aauth_edocs import (
-    ControllerPolicy,
+    ControllerRuleEngine,
     Dataflow,
     ExactRule,
     HttpRequest,
@@ -68,7 +68,7 @@ def _world(conditional=False):
         key=controller_key,
         transport=transport,
         sentinel=SENTINEL,
-        controller_policy=ControllerPolicy((rule,)),
+        rule_engine=ControllerRuleEngine((rule,)),
     )
     transport.add(CONTROLLER, app)
     return {
@@ -202,9 +202,9 @@ def test_edocs_mode_default_denies_when_policy_does_not_match():
 
 
 def test_edocs_configuration_is_paired():
-    policy = ControllerPolicy(())
+    policy = ControllerRuleEngine(())
 
-    for kwargs in ({"sentinel": SENTINEL}, {"controller_policy": policy}):
+    for kwargs in ({"sentinel": SENTINEL}, {"rule_engine": policy}):
         try:
             create_as(CONTROLLER, **kwargs)
         except ValueError as error:

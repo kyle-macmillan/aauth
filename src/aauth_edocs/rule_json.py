@@ -1,11 +1,11 @@
-"""Framework-neutral JSON representation of mutable eDocs policy rules."""
+"""Framework-neutral JSON representation of mutable eDocs controller rules."""
 
 from __future__ import annotations
 
 from typing import Any
 
 from .edocs import Dataflow, ExactRule, OutputOf
-from .policy_store import StoredRule
+from .rule_store import StoredRule
 
 
 def serialize_dataflow(dataflow: Dataflow) -> dict[str, Any]:

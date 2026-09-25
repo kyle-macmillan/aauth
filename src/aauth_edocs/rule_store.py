@@ -1,4 +1,4 @@
-"""Thread-safe mutable exact-rule policy for eDocs controller ASes."""
+"""Thread-safe mutable exact-rule engine for eDocs controller ASes."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ class StoredRule:
         return self.rule.prerequisite
 
 
-class MutableControllerPolicy:
-    """Mutable implementation of the controller policy evaluator boundary."""
+class MutableControllerRuleEngine:
+    """Mutable implementation of the controller rule evaluator boundary."""
 
     def __init__(
         self,
@@ -42,6 +42,13 @@ class MutableControllerPolicy:
     def list_rules(self) -> tuple[StoredRule, ...]:
         with self._lock:
             return tuple(self._rules.values())
+
+    def get_rule(self, rule_id: str) -> StoredRule:
+        with self._lock:
+            try:
+                return self._rules[rule_id]
+            except KeyError as error:
+                raise KeyError(f"unknown rule ID: {rule_id}") from error
 
     def create_rule(
         self,
@@ -125,7 +132,7 @@ class MutableControllerPolicy:
             stored.rule_id != excluding and stored.target == target
             for stored in self._rules.values()
         ):
-            raise ValueError("controller policy cannot contain duplicate dataflow targets")
+            raise ValueError("controller rules cannot contain duplicate dataflow targets")
 
     @staticmethod
     def _validate_rule(

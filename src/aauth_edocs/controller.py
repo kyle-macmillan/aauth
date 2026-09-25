@@ -1,4 +1,4 @@
-"""Controller policy evaluation and intermediate eDocs token issuance."""
+"""Controller rule evaluation and intermediate eDocs token issuance."""
 
 from __future__ import annotations
 
@@ -15,20 +15,20 @@ from .tokens import issue_auth_token, issue_conditional_auth_token
 Now = Callable[[], float]
 
 
-class ControllerPolicyEvaluator(Protocol):
+class ControllerRuleEvaluator(Protocol):
     def evaluate(self, proposal: Dataflow) -> ExactRule | None: ...
 
 
 @dataclass(frozen=True)
-class ControllerPolicy:
-    """One controller's exact-match, default-deny policy."""
+class ControllerRuleEngine:
+    """One controller's exact-match, default-deny rules."""
 
     rules: tuple[ExactRule, ...]
 
     def __post_init__(self) -> None:
         targets = [rule.dataflow for rule in self.rules]
         if len(set(targets)) != len(targets):
-            raise ValueError("controller policy cannot contain duplicate dataflow targets")
+            raise ValueError("controller rules cannot contain duplicate dataflow targets")
 
     def evaluate(self, proposal: Dataflow) -> ExactRule | None:
         """Return the exact matching rule, or ``None`` for denial."""
@@ -38,7 +38,7 @@ class ControllerPolicy:
 def issue_controller_decision(
     *,
     proposal: Dataflow,
-    policy: ControllerPolicyEvaluator,
+    rule_engine: ControllerRuleEvaluator,
     issuer: str,
     sentinel: str,
     agent_jwk: dict,
@@ -52,9 +52,9 @@ def issue_controller_decision(
     The caller is responsible for constructing ``proposal`` from verified
     agent and resource tokens. Provenance is deliberately not an input.
     """
-    rule = policy.evaluate(proposal)
+    rule = rule_engine.evaluate(proposal)
     if rule is None:
-        raise AAuthError(DENIED, 403, "no controller policy matches the proposed dataflow")
+        raise AAuthError(DENIED, 403, "no controller rule matches the proposed dataflow")
 
     common = {
         "issuer": issuer,

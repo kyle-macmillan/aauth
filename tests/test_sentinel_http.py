@@ -1,7 +1,7 @@
 from flask import Flask
 
 from aauth_edocs import (
-    ControllerPolicy,
+    ControllerRuleEngine,
     Dataflow,
     ExactRule,
     FunctionDescriptor,
@@ -91,9 +91,9 @@ def _world(*, conditional=False, controller_b_denies=False):
     transport.add(PS, _server_app(PS, "aauth-person.json", keys["ps"]))
     transport.add(OTHER_PS, _server_app(OTHER_PS, "aauth-person.json", keys["other_ps"]))
 
-    policy_a = ControllerPolicy((ExactRule(proposal),))
+    policy_a = ControllerRuleEngine((ExactRule(proposal),))
     policy_b_target = Dataflow(SOURCE, "identity@1", "other-doc", AGENT) if controller_b_denies else proposal
-    policy_b = ControllerPolicy(
+    policy_b = ControllerRuleEngine(
         (ExactRule(policy_b_target, prerequisite if conditional and not controller_b_denies else None),)
     )
     transport.add(
@@ -103,7 +103,7 @@ def _world(*, conditional=False, controller_b_denies=False):
             key=keys["as_a"],
             transport=transport,
             sentinel=SENTINEL,
-            controller_policy=policy_a,
+            rule_engine=policy_a,
         ),
     )
     transport.add(
@@ -113,7 +113,7 @@ def _world(*, conditional=False, controller_b_denies=False):
             key=keys["as_b"],
             transport=transport,
             sentinel=SENTINEL,
-            controller_policy=policy_b,
+            rule_engine=policy_b,
         ),
     )
     sentinel_app = create_sentinel(

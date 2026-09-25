@@ -3,10 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from aauth_edocs import (
-    ControllerPolicy,
+    ControllerRuleEngine,
     Dataflow,
     ExactRule,
-    MutableControllerPolicy,
+    MutableControllerRuleEngine,
     OutputOf,
     SentinelRegistry,
     parse_rule,
@@ -36,15 +36,15 @@ def _flow(index: int = 0, **changes) -> Dataflow:
 def test_mutable_policy_matches_immutable_exact_decisions():
     target = _flow()
     changed = _flow(arguments={"limit": 100})
-    immutable = ControllerPolicy((ExactRule(target),))
-    mutable = MutableControllerPolicy((ExactRule(target),))
+    immutable = ControllerRuleEngine((ExactRule(target),))
+    mutable = MutableControllerRuleEngine((ExactRule(target),))
 
     assert mutable.evaluate(target) == immutable.evaluate(target)
     assert mutable.evaluate(changed) == immutable.evaluate(changed) is None
 
 
 def test_create_replace_and_delete_preserve_stable_rule_id():
-    policy = MutableControllerPolicy()
+    policy = MutableControllerRuleEngine()
     original = policy.create_rule(_flow(), rule_id="rule-1")
 
     assert policy.evaluate(original.target) == original.rule
@@ -60,7 +60,7 @@ def test_create_replace_and_delete_preserve_stable_rule_id():
 
 
 def test_duplicate_targets_and_rule_ids_are_rejected():
-    policy = MutableControllerPolicy()
+    policy = MutableControllerRuleEngine()
     policy.create_rule(_flow(), rule_id="first")
 
     with pytest.raises(ValueError, match="duplicate dataflow"):
@@ -76,7 +76,7 @@ def test_conditional_rule_and_json_round_trip_preserve_semantics():
         function="prepare@1",
         arguments={"format": "parquet"},
     )
-    policy = MutableControllerPolicy()
+    policy = MutableControllerRuleEngine()
     stored = policy.create_rule(
         target,
         prerequisite,
@@ -99,7 +99,7 @@ def test_future_output_rule_matches_only_after_trusted_materialization():
         destination="aauth:carol@example",
         arguments={},
     )
-    policy = MutableControllerPolicy(
+    policy = MutableControllerRuleEngine(
         (ExactRule(target),),
         derived_resolver=registry.derived_documents.get,
     )
@@ -157,7 +157,7 @@ def test_invalid_serialized_rules_are_rejected(value):
 
 
 def test_concurrent_reads_and_writes_preserve_all_rules():
-    policy = MutableControllerPolicy()
+    policy = MutableControllerRuleEngine()
 
     def create(index: int):
         stored = policy.create_rule(_flow(index), rule_id=f"rule-{index}")

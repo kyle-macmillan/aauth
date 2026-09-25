@@ -15,7 +15,7 @@ from typing import Any, Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
-from .controller import ControllerPolicyEvaluator, issue_controller_decision
+from .controller import ControllerRuleEvaluator, issue_controller_decision
 from .edocs import Dataflow, OutputOf
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
@@ -24,8 +24,8 @@ from .httpsig import HttpRequest, verify
 from .ids import DWK_ACCESS
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata
-from .policy_json import parse_dataflow, serialize_rule
-from .policy_store import MutableControllerPolicy
+from .rule_json import parse_dataflow, serialize_rule
+from .rule_store import MutableControllerRuleEngine
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
 # policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
@@ -40,13 +40,13 @@ def create_as(
     app: Flask | None = None,
     token_path: str = "/token",
     jwks_path: str = "/jwks.json",
-    policy_path: str = "/policy",
+    rules_path: str = "/rules",
     pending_path: str = "/pending",
     sentinel: str | None = None,
-    controller_policy: ControllerPolicyEvaluator | None = None,
+    rule_engine: ControllerRuleEvaluator | None = None,
 ) -> Flask:
-    if (sentinel is None) != (controller_policy is None):
-        raise ValueError("sentinel and controller_policy must be configured together")
+    if (sentinel is None) != (rule_engine is None):
+        raise ValueError("sentinel and rule_engine must be configured together")
     app = app or Flask("aauth-as")
     key = key or SigningKey.generate(kid="as")
     resolver = JwksResolver(transport or RequestsTransport())
@@ -120,7 +120,7 @@ def create_as(
             )
             token = issue_controller_decision(
                 proposal=proposal,
-                policy=controller_policy,
+                rule_engine=rule_engine,
                 issuer=issuer,
                 sentinel=sentinel,
                 agent_jwk=agent_claims["cnf"]["jwk"],
@@ -137,16 +137,16 @@ def create_as(
 
         return _check_scope_and_issue(context, granted)
 
-    # Policy Management
-    def _mutable_policy() -> MutableControllerPolicy:
-        if not isinstance(controller_policy, MutableControllerPolicy):
-            raise AAuthError(INVALID_REQUEST, 404, "this AS has no mutable controller policy")
-        return controller_policy
+    # Rule management
+    def _mutable_engine() -> MutableControllerRuleEngine:
+        if not isinstance(rule_engine, MutableControllerRuleEngine):
+            raise AAuthError(INVALID_REQUEST, 404, "this AS has no mutable rule engine")
+        return rule_engine
 
-    def _parse_policy_body() -> tuple[Dataflow, Dataflow | None]:
+    def _parse_rule_body() -> tuple[Dataflow, Dataflow | None]:
         body = request.get_json(silent=True)
         if not isinstance(body, dict) or set(body) - {"target", "prerequisite"} or "target" not in body:
-            raise AAuthError(INVALID_REQUEST, 400, "policy requires target and optional prerequisite")
+            raise AAuthError(INVALID_REQUEST, 400, "rule requires target and optional prerequisite")
         prerequisite = body.get("prerequisite")
         try:
             return (
@@ -156,48 +156,62 @@ def create_as(
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 400, str(error)) from error
 
-    @app.post(policy_path, endpoint="aauth_as_policy")
-    def add_policy():
-        """Adds a rule to the controller policy evaluator; the rule ID is
-        assigned by the store and returned in the response.
+    def _reads(dataflow: Dataflow, edoc_id: str) -> bool:
+        document = dataflow.document
+        if isinstance(document, OutputOf):
+            return _reads(document.dataflow, edoc_id)
+        return document == edoc_id
+
+    @app.get(rules_path, endpoint="aauth_as_list_rules")
+    def list_rules():
+        """Lists all rules; ``?edoc_id=<id>`` keeps only rules whose target
+        reads that eDoc, directly or as the input of an ``output_of`` selector."""
+        edoc_id = request.args.get("edoc_id")
+        rules = _mutable_engine().list_rules()
+        if edoc_id is not None:
+            rules = tuple(stored for stored in rules if _reads(stored.target, edoc_id))
+        return {"rules": [serialize_rule(stored) for stored in rules]}
+
+    @app.post(rules_path, endpoint="aauth_as_create_rule")
+    def create_rule():
+        """Creates a rule; the rule ID is assigned by the engine.
         Body: ``{"target": <dataflow>, "prerequisite": <dataflow> | null}``."""
-        policy_store = _mutable_policy()
-        target, prerequisite = _parse_policy_body()
+        engine = _mutable_engine()
+        target, prerequisite = _parse_rule_body()
         try:
-            stored = policy_store.create_rule(target, prerequisite)
+            stored = engine.create_rule(target, prerequisite)
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
         return {"rule": serialize_rule(stored)}, 201
 
-    @app.put(f"{policy_path}/<pid>", endpoint="aauth_policy_update")
-    def update_policy(pid: str):
-        """Replaces rule ``pid`` with the target/prerequisite in the body."""
-        policy_store = _mutable_policy()
-        target, prerequisite = _parse_policy_body()
+    @app.get(f"{rules_path}/<rule_id>", endpoint="aauth_as_get_rule")
+    def get_rule(rule_id: str):
         try:
-            stored = policy_store.replace_rule(pid, target, prerequisite)
+            stored = _mutable_engine().get_rule(rule_id)
         except KeyError as error:
-            raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {pid}") from error
+            raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
+        return {"rule": serialize_rule(stored)}
+
+    @app.put(f"{rules_path}/<rule_id>", endpoint="aauth_as_replace_rule")
+    def replace_rule(rule_id: str):
+        """Replaces the rule's target/prerequisite with those in the body."""
+        engine = _mutable_engine()
+        target, prerequisite = _parse_rule_body()
+        try:
+            stored = engine.replace_rule(rule_id, target, prerequisite)
+        except KeyError as error:
+            raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
         return {"rule": serialize_rule(stored)}
 
-    @app.get(policy_path, endpoint="rules_for_edoc")
-    def rules_for_edoc():
-        """For ``?edoc_id=<id>``, return the rules whose target reads that
-        eDoc, either directly or as the input of an ``output_of`` selector."""
-        edoc_id = request.args.get("edoc_id")
-        if not edoc_id:
-            raise AAuthError(INVALID_REQUEST, 400, "edoc_id query parameter is required")
-
-        def reads(dataflow: Dataflow) -> bool:
-            document = dataflow.document
-            if isinstance(document, OutputOf):
-                return reads(document.dataflow)
-            return document == edoc_id
-
-        rules = [serialize_rule(stored) for stored in _mutable_policy().list_rules() if reads(stored.target)]
-        return {"edoc_id": edoc_id, "rules": rules}
+    @app.delete(f"{rules_path}/<rule_id>", endpoint="aauth_as_delete_rule")
+    def delete_rule(rule_id: str):
+        try:
+            _mutable_engine().delete_rule(rule_id)
+        except KeyError as error:
+            raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
+        return "", 204
 
     # Pending requests
     @app.get(f"{pending_path}/<pid>", endpoint="aauth_as_pending")

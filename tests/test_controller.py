@@ -2,7 +2,7 @@ import pytest
 
 from aauth_edocs import (
     AAuthError,
-    ControllerPolicy,
+    ControllerRuleEngine,
     Dataflow,
     ExactRule,
     issue_controller_decision,
@@ -30,7 +30,7 @@ def _flow(**changes) -> Dataflow:
 def _issue(policy, ps_key, agent_key, proposal=None):
     return issue_controller_decision(
         proposal=proposal or _flow(),
-        policy=policy,
+        rule_engine=policy,
         issuer=PS,
         sentinel=SENTINEL,
         agent_jwk=agent_key.public_jwk,
@@ -39,9 +39,9 @@ def _issue(policy, ps_key, agent_key, proposal=None):
     )
 
 
-def test_controller_policy_matches_only_complete_dataflow():
+def test_controller_rule_engine_matches_only_complete_dataflow():
     proposal = _flow()
-    policy = ControllerPolicy((ExactRule(proposal),))
+    policy = ControllerRuleEngine((ExactRule(proposal),))
 
     assert policy.evaluate(proposal) == policy.rules[0]
     assert policy.evaluate(_flow(source="aauth:other@ap.example")) is None
@@ -50,7 +50,7 @@ def test_controller_policy_matches_only_complete_dataflow():
     assert policy.evaluate(_flow(destination="aauth:other@ap.example")) is None
 
 
-def test_controller_policy_matches_canonical_arguments_exactly():
+def test_controller_rule_engine_matches_canonical_arguments_exactly():
     proposal = Dataflow.from_arguments(
         "aauth:source@ap.example",
         "search@1",
@@ -72,16 +72,16 @@ def test_controller_policy_matches_canonical_arguments_exactly():
         proposal.destination,
         {"query": "termination", "limit": 100},
     )
-    policy = ControllerPolicy((ExactRule(proposal),))
+    policy = ControllerRuleEngine((ExactRule(proposal),))
 
     assert policy.evaluate(reordered) == policy.rules[0]
     assert policy.evaluate(changed) is None
 
 
-def test_controller_policy_rejects_duplicate_targets():
+def test_controller_rule_engine_rejects_duplicate_targets():
     proposal = _flow()
     with pytest.raises(ValueError, match="duplicate"):
-        ControllerPolicy(
+        ControllerRuleEngine(
             (
                 ExactRule(proposal),
                 ExactRule(proposal, prerequisite=_flow(document="doc-input")),
@@ -92,12 +92,12 @@ def test_controller_policy_rejects_duplicate_targets():
 @pytest.mark.parametrize(
     "policy",
     [
-        ControllerPolicy(()),
-        ControllerPolicy((ExactRule(_flow(document="doc-456")),)),
+        ControllerRuleEngine(()),
+        ControllerRuleEngine((ExactRule(_flow(document="doc-456")),)),
     ],
 )
 def test_controller_decision_defaults_to_denial(policy, ps_key, agent_key):
-    with pytest.raises(AAuthError, match="no controller policy") as caught:
+    with pytest.raises(AAuthError, match="no controller rule") as caught:
         _issue(policy, ps_key, agent_key)
 
     assert caught.value.code == "denied"
@@ -108,7 +108,7 @@ def test_unconditional_controller_decision_is_sentinel_auth_token(
     ps_key, agent_key, agent, resolver
 ):
     proposal = _flow(destination=agent)
-    token = _issue(ControllerPolicy((ExactRule(proposal),)), ps_key, agent_key, proposal)
+    token = _issue(ControllerRuleEngine((ExactRule(proposal),)), ps_key, agent_key, proposal)
 
     header, claims = peek_jwt(token)
     assert header["typ"] == "aa-auth+jwt"
@@ -142,7 +142,7 @@ def test_conditional_controller_decision_is_sentinel_conditional_token(
         document="doc-input",
         destination=agent,
     )
-    policy = ControllerPolicy((ExactRule(proposal, prerequisite),))
+    policy = ControllerRuleEngine((ExactRule(proposal, prerequisite),))
 
     token = _issue(policy, ps_key, agent_key, proposal)
 
