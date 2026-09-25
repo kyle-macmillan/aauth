@@ -18,7 +18,7 @@ Now = Callable[[], float]
 def issue_controller_decision(
     *,
     proposal: Dataflow,
-    rule_engine: RuleEvaluator[Dataflow],
+    rule_engine: RuleEvaluator,
     issuer: str,
     sentinel: str,
     agent_jwk: dict,

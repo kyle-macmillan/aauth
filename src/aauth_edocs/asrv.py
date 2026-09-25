@@ -42,7 +42,7 @@ def create_as(
     rules_path: str = "/rules",
     pending_path: str = "/pending",
     sentinel: str | None = None,
-    rule_engine: RuleEvaluator[Dataflow] | None = None,
+    rule_engine: RuleEvaluator | None = None,
 ) -> Flask:
     if (sentinel is None) != (rule_engine is None):
         raise ValueError("sentinel and rule_engine must be configured together")
