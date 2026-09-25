@@ -16,7 +16,7 @@ from flask import Flask, request
 
 from .agent import RequestsTransport
 from .controller import ControllerPolicyEvaluator, issue_controller_decision
-from .edocs import Dataflow
+from .edocs import Dataflow, OutputOf
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
 from .headers import APPROVAL, CLAIMS, INTERACTION, build_requirement
@@ -24,6 +24,8 @@ from .httpsig import HttpRequest, verify
 from .ids import DWK_ACCESS
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata
+from .policy_json import parse_dataflow, serialize_rule
+from .policy_store import MutableControllerPolicy
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
 # policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
@@ -38,6 +40,7 @@ def create_as(
     app: Flask | None = None,
     token_path: str = "/token",
     jwks_path: str = "/jwks.json",
+    policy_path: str = "/policy",
     pending_path: str = "/pending",
     sentinel: str | None = None,
     controller_policy: ControllerPolicyEvaluator | None = None,
@@ -134,6 +137,69 @@ def create_as(
 
         return _check_scope_and_issue(context, granted)
 
+    # Policy Management
+    def _mutable_policy() -> MutableControllerPolicy:
+        if not isinstance(controller_policy, MutableControllerPolicy):
+            raise AAuthError(INVALID_REQUEST, 404, "this AS has no mutable controller policy")
+        return controller_policy
+
+    def _parse_policy_body() -> tuple[Dataflow, Dataflow | None]:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or set(body) - {"target", "prerequisite"} or "target" not in body:
+            raise AAuthError(INVALID_REQUEST, 400, "policy requires target and optional prerequisite")
+        prerequisite = body.get("prerequisite")
+        try:
+            return (
+                parse_dataflow(body["target"]),
+                parse_dataflow(prerequisite) if prerequisite is not None else None,
+            )
+        except (TypeError, ValueError) as error:
+            raise AAuthError(INVALID_REQUEST, 400, str(error)) from error
+
+    @app.post(policy_path, endpoint="aauth_as_policy")
+    def add_policy():
+        """Adds a rule to the controller policy evaluator; the rule ID is
+        assigned by the store and returned in the response.
+        Body: ``{"target": <dataflow>, "prerequisite": <dataflow> | null}``."""
+        policy_store = _mutable_policy()
+        target, prerequisite = _parse_policy_body()
+        try:
+            stored = policy_store.create_rule(target, prerequisite)
+        except (TypeError, ValueError) as error:
+            raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
+        return {"rule": serialize_rule(stored)}, 201
+
+    @app.put(f"{policy_path}/<pid>", endpoint="aauth_policy_update")
+    def update_policy(pid: str):
+        """Replaces rule ``pid`` with the target/prerequisite in the body."""
+        policy_store = _mutable_policy()
+        target, prerequisite = _parse_policy_body()
+        try:
+            stored = policy_store.replace_rule(pid, target, prerequisite)
+        except KeyError as error:
+            raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {pid}") from error
+        except (TypeError, ValueError) as error:
+            raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
+        return {"rule": serialize_rule(stored)}
+
+    @app.get(policy_path, endpoint="rules_for_edoc")
+    def rules_for_edoc():
+        """For ``?edoc_id=<id>``, return the rules whose target reads that
+        eDoc, either directly or as the input of an ``output_of`` selector."""
+        edoc_id = request.args.get("edoc_id")
+        if not edoc_id:
+            raise AAuthError(INVALID_REQUEST, 400, "edoc_id query parameter is required")
+
+        def reads(dataflow: Dataflow) -> bool:
+            document = dataflow.document
+            if isinstance(document, OutputOf):
+                return reads(document.dataflow)
+            return document == edoc_id
+
+        rules = [serialize_rule(stored) for stored in _mutable_policy().list_rules() if reads(stored.target)]
+        return {"edoc_id": edoc_id, "rules": rules}
+
+    # Pending requests
     @app.get(f"{pending_path}/<pid>", endpoint="aauth_as_pending")
     def pending(pid: str):
         status, headers, body = store.response(pid)
