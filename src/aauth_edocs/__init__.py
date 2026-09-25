@@ -2,7 +2,7 @@
 internal eDocs experimentation. See IMPLEMENTATION_PLAN.md for scope and
 the simplifications relative to the spec."""
 
-from .controller import ControllerRuleEngine, ControllerRuleEvaluator, issue_controller_decision
+from .controller import issue_controller_decision
 from .coordinator import ApprovalRequired, AuthorizationCoordinator, resource_origin
 from .deferred import PendingStore, poll
 from .edocs import (
@@ -11,7 +11,6 @@ from .edocs import (
     Dataflow,
     DataflowBinding,
     DerivedEdoc,
-    ExactRule,
     FunctionDescriptor,
     OutputOf,
     ResourceBinding,
@@ -39,8 +38,29 @@ from .httpsig import HttpHeaders, HttpRequest, VerifiedRequest, peek_jwt, sign, 
 from .ids import DWK_ACCESS, DWK_AGENT, DWK_PERSON, DWK_RESOURCE, agent_id, parse_agent_id, well_known_url
 from .keys import SigningKey, jwk_thumbprint, verify_raw
 from .metadata import JwksResolver, Metadata, build_metadata, fetch_metadata, static_resolver
-from .rule_json import parse_dataflow, parse_rule, serialize_dataflow, serialize_rule
-from .rule_store import MutableControllerRuleEngine, StoredRule
+from .dataflow_json import parse_dataflow, serialize_dataflow
+from .rules import (
+    Allow,
+    DataflowRule,
+    Deny,
+    ExactFunction,
+    FunctionSource,
+    Policy,
+    PolicyEnforcer,
+    PolicyQuestion,
+    PolicyVerdict,
+    RuleAdmin,
+    RuleDecision,
+    RuleEngine,
+    RuleEvaluator,
+    StoredRule,
+    exact_rule,
+    parse_rule,
+    parse_stored_rule,
+    policy_rule,
+    serialize_rule,
+    source_digest,
+)
 from .sentinel import aggregate_controller_decisions, create_sentinel
 from .tokens import (
     AGENT_TYP,

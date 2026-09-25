@@ -20,6 +20,9 @@ todos:
   - id: downstream
     content: Update mcp-aauth end-to-end test and mcp-aauth-codex demo.py/control_panel.py
     status: pending
+  - id: artifacts
+    content: "mcp-aauth-codex: make stored artifacts match their digests (identity@1, query_table@1, control-panel SQL) and wire source_resolver"
+    status: pending
   - id: verify
     content: Run pytest in aauth, mcp-aauth, mcp-aauth-codex
     status: pending
@@ -43,7 +46,7 @@ aauth/src/aauth_edocs/
   controller.py       # issue_controller_decision only (token signing stays here)
 ```
 
-Delete `rule_json.py` and `rule_store.py`. Remove `ExactRule` from [edocs.py](aauth/src/aauth_edocs/edocs.py), and remove `ControllerRuleEngine` and `ControllerRuleEvaluator` from [controller.py](aauth/src/aauth_edocs/controller.py). `rules/` imports `edocs` (`Dataflow`, `OutputOf`, `DerivedEdoc`, `FunctionDescriptor`) and never imports `tokens` or `keys`.
+Delete `rule_json.py` and `rule_store.py`. Remove `ExactRule` from [edocs.py](aauth/src/aauth_edocs/edocs.py), and remove `ControllerRuleEngine` and `ControllerRuleEvaluator` from [controller.py](aauth/src/aauth_edocs/controller.py). `rules/` imports `edocs` (`Dataflow`, `OutputOf`, `DerivedEdoc`, `FunctionDescriptor`) and never imports `tokens` or `keys`. `FunctionDescriptor` is used only for its trusted `digest`.
 
 ## Model
 
@@ -90,16 +93,22 @@ flowchart TD
     filterExact --> exactRules{"ExactFunction rule matches id + args hash?"}
     exactRules -->|yes| allowExact["Allow, reason None"]
     exactRules -->|no| policyRules["Policy rules in creation order"]
-    policyRules --> descriptor{"Descriptor resolvable?"}
-    descriptor -->|no| denyAll["Deny"]
-    descriptor -->|yes| enforcer["FailClosedEnforcer + cache"]
+    policyRules --> source{"Registered digest and raw source resolvable?"}
+    source -->|no| denyAll["Deny"]
+    source -->|yes| verify{"sha256 of source equals registered digest?"}
+    verify -->|no| denyAll
+    verify -->|yes| enforcer["FailClosedEnforcer + cache"]
     enforcer -->|allow| allowPolicy["Allow with reason"]
     enforcer -->|"deny / error / garbage"| nextRule["next policy rule, else Deny with rule_ids"]
 ```
 
 - Keep the existing `OutputOf` resolution logic from `rule_store.py` (`_matches`), applied to the non-function fields.
 - Never call the enforcer while holding the lock. Take a snapshot of candidate rules first.
-- `RuleEngine(rules=(), *, derived_resolver=None, function_resolver=None, enforcer=None)`. `function_resolver: Callable[[str], FunctionDescriptor | None]`, and the demo passes `registry.functions.get`.
+- `RuleEngine(rules=(), *, derived_resolver=None, function_resolver=None, source_resolver=None, enforcer=None)`.
+  - `function_resolver: Callable[[str], FunctionDescriptor | None]` supplies the trusted digest. The demo passes `registry.functions.get` (Sentinel registry).
+  - `source_resolver: Callable[[str], FunctionSource | None]` supplies the raw function. The demo adapts the provider's `MutableFunctionRegistry.artifact()` (`{"runtime", "source"}`).
+  - The engine verifies `source_digest(source) == descriptor.digest` before calling the enforcer, where `source_digest(s) = "sha256:" + sha256(s.encode()).hexdigest()` is defined in `rules/policy.py`. A mismatch or a missing value denies.
+  - The descriptor's `description` and `input_schema` are never shown to the enforcer.
 - Creating a policy rule raises `ValueError` if the engine has no `enforcer`, so a rule can't sit there silently denying.
 - Duplicate check: exact rules keep today's duplicate-target check. Policy rules are duplicates only if source, document, destination and text are all identical.
 
@@ -107,10 +116,16 @@ flowchart TD
 
 ```python
 @dataclass(frozen=True)
+class FunctionSource:
+    runtime: str         # e.g. "sql", "python"
+    source: str          # exact bytes covered by the registered digest
+
+@dataclass(frozen=True)
 class PolicyQuestion:
-    policy: str
-    proposal: Dataflow
-    function: FunctionDescriptor   # Sentinel-registered, digest-pinned
+    policy: str          # controller's rule text
+    proposal: Dataflow   # includes the call arguments
+    function_id: str
+    function: FunctionSource   # digest-verified raw function; no description
 
 @dataclass(frozen=True)
 class PolicyVerdict:
@@ -122,7 +137,7 @@ class PolicyEnforcer(Protocol):
 ```
 
 - `FailClosedEnforcer(inner)`: any exception, a non-`PolicyVerdict` result, or a missing reason becomes a deny.
-- `CachingEnforcer(inner)`: key is (rule_id, policy text, function id, function digest, args hash). The engine wraps whatever enforcer it's given as caching over fail-closed.
+- `CachingEnforcer(inner)`: key is (rule_id, policy text, function id, verified source digest, args hash). The engine wraps whatever enforcer it's given as caching over fail-closed.
 - No LLM SDK dependency. Tests use a fake enforcer.
 
 ## Protocols and AS wiring
@@ -144,9 +159,13 @@ Existing exact-rule JSON (`function` plus `function_args`) is unchanged, so curr
 
 ## Downstream updates (separate git repos; build on top of their existing uncommitted edits, no commits)
 
-- `aauth`: [__init__.py](aauth/src/aauth_edocs/__init__.py) exports. [sentinel.py](aauth/src/aauth_edocs/sentinel.py) imports from `dataflow_json`. Update the tests `test_controller.py`, `test_rule_store.py` (renamed to `test_rules_engine.py`), `test_as_rules.py`, `test_as_edocs.py`, `test_sentinel.py`, `test_sentinel_http.py` and `test_edocs.py`: swap `ControllerRuleEngine((ExactRule(flow),))` for `RuleEngine((exact_rule(flow),))` and add a small `exact_rule(dataflow, prerequisite=None)` helper in `rules`. Add `test_rules_policy.py` covering fake-enforcer allow, deny, exception, garbage output, missing descriptor, cache hit, exact-before-policy ordering, rejecting policy rules when there's no enforcer, and the enforcer not being called while the lock is held.
+- `aauth`: [__init__.py](aauth/src/aauth_edocs/__init__.py) exports. [sentinel.py](aauth/src/aauth_edocs/sentinel.py) imports from `dataflow_json`. Update the tests `test_controller.py`, `test_rule_store.py` (renamed to `test_rules_engine.py`), `test_as_rules.py`, `test_as_edocs.py`, `test_sentinel.py`, `test_sentinel_http.py` and `test_edocs.py`: swap `ControllerRuleEngine((ExactRule(flow),))` for `RuleEngine((exact_rule(flow),))` and add a small `exact_rule(dataflow, prerequisite=None)` helper in `rules`. Add `test_rules_policy.py` covering fake-enforcer allow, deny, exception, garbage output, missing descriptor, missing source, source/digest mismatch, the enforcer never receiving the description, cache hit, exact-before-policy ordering, rejecting policy rules when there's no enforcer, and the enforcer not being called while the lock is held.
 - `mcp-aauth`: [tests/test_edocs_end_to_end.py](mcp-aauth/tests/test_edocs_end_to_end.py) gets the same swap.
-- `mcp-aauth-codex`: [demo.py](mcp-aauth-codex/src/mcp_edocs_agent/demo.py) uses `RuleEngine` with `function_resolver=self.registry.functions.get`. The policy routes in [control_panel.py](mcp-aauth-codex/src/mcp_edocs_agent/control_panel.py) delegate body parsing to `policy.create_rule(body)` / `replace_rule(rule_id, body)`.
+- `mcp-aauth-codex`: [demo.py](mcp-aauth-codex/src/mcp_edocs_agent/demo.py) uses `RuleEngine` with `function_resolver=self.registry.functions.get` and a `source_resolver` built on `self.function_registry.artifact`.
+- `mcp-aauth-codex`: make every stored artifact the exact string its digest covers, all hashed with `source_digest`, in [functions.py](mcp-aauth-codex/src/mcp_edocs_agent/functions.py) and `demo.py`:
+  - `identity@1` currently hashes `"return the governed eDoc payload unchanged"` but stores `"identity(input)"`. Store and hash one string.
+  - `query_table@1` currently hashes the whole `functions.py` file but stores a placeholder. Use `runtime: "python"` and `inspect.getsource(query_table)` for both the digest and the stored source. The SQL that actually runs arrives in the call arguments, which the enforcer sees through the proposal.
+  - For SQL functions registered through the control panel, `sql_function_registration` hashes `sql.strip()` while the demo stores the unstripped `implementation`. Store the normalized source. The policy routes in [control_panel.py](mcp-aauth-codex/src/mcp_edocs_agent/control_panel.py) delegate body parsing to `policy.create_rule(body)` / `replace_rule(rule_id, body)`.
 - `mcp-edocs-provider`: no rule usage. It only uses `FunctionDescriptor`, which is unchanged.
 - `ps.py` is not touched.
 

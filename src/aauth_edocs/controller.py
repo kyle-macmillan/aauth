@@ -1,44 +1,24 @@
-"""Controller rule evaluation and intermediate eDocs token issuance."""
+"""Intermediate eDocs token issuance for controller decisions."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable
 
-from .edocs import Dataflow, ExactRule
+from .edocs import Dataflow
 from .errors import AAuthError, DENIED
 from .ids import DWK_ACCESS
 from .keys import SigningKey
+from .rules import Allow, RuleEvaluator
 from .tokens import issue_auth_token, issue_conditional_auth_token
 
 Now = Callable[[], float]
 
 
-class ControllerRuleEvaluator(Protocol):
-    def evaluate(self, proposal: Dataflow) -> ExactRule | None: ...
-
-
-@dataclass(frozen=True)
-class ControllerRuleEngine:
-    """One controller's exact-match, default-deny rules."""
-
-    rules: tuple[ExactRule, ...]
-
-    def __post_init__(self) -> None:
-        targets = [rule.dataflow for rule in self.rules]
-        if len(set(targets)) != len(targets):
-            raise ValueError("controller rules cannot contain duplicate dataflow targets")
-
-    def evaluate(self, proposal: Dataflow) -> ExactRule | None:
-        """Return the exact matching rule, or ``None`` for denial."""
-        return next((rule for rule in self.rules if rule.matches(proposal)), None)
-
-
 def issue_controller_decision(
     *,
     proposal: Dataflow,
-    rule_engine: ControllerRuleEvaluator,
+    rule_engine: RuleEvaluator[Dataflow],
     issuer: str,
     sentinel: str,
     agent_jwk: dict,
@@ -51,9 +31,10 @@ def issue_controller_decision(
 
     The caller is responsible for constructing ``proposal`` from verified
     agent and resource tokens. Provenance is deliberately not an input.
+    Denial reasons are not returned to the requester.
     """
-    rule = rule_engine.evaluate(proposal)
-    if rule is None:
+    decision = rule_engine.evaluate(proposal)
+    if not isinstance(decision, Allow):
         raise AAuthError(DENIED, 403, "no controller rule matches the proposed dataflow")
 
     common = {
@@ -70,10 +51,10 @@ def issue_controller_decision(
         "lifetime": lifetime,
         "now": now,
     }
-    if rule.prerequisite is not None:
+    if decision.rule.prerequisite is not None:
         return issue_conditional_auth_token(
             **common,
-            prerequisite=rule.prerequisite,
+            prerequisite=decision.rule.prerequisite,
         )
     return issue_auth_token(
         **common,

@@ -2,9 +2,9 @@ import pytest
 
 from aauth_edocs import (
     AAuthError,
-    ControllerRuleEngine,
+    RuleEngine,
     Dataflow,
-    ExactRule,
+    exact_rule,
     SentinelRegistry,
     SigningKey,
     aggregate_controller_decisions,
@@ -115,7 +115,7 @@ def _aggregate(
 def test_two_unconditional_approvals_mint_one_final_token(
     proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         issuer: _decision(issuer, key, policy, proposal, agent_key)
         for issuer, key in controller_keys.items()
@@ -161,14 +161,14 @@ def test_satisfied_conditional_and_unconditional_approvals_succeed(
         AS_A: _decision(
             AS_A,
             controller_keys[AS_A],
-            ControllerRuleEngine((ExactRule(proposal),)),
+            RuleEngine((exact_rule(proposal),)),
             proposal,
             agent_key,
         ),
         AS_B: _decision(
             AS_B,
             controller_keys[AS_B],
-            ControllerRuleEngine((ExactRule(proposal, prerequisite),)),
+            RuleEngine((exact_rule(proposal, prerequisite),)),
             proposal,
             agent_key,
         ),
@@ -198,14 +198,14 @@ def test_missing_prerequisite_denies_without_materializing(
         AS_A: _decision(
             AS_A,
             controller_keys[AS_A],
-            ControllerRuleEngine((ExactRule(proposal),)),
+            RuleEngine((exact_rule(proposal),)),
             proposal,
             agent_key,
         ),
         AS_B: _decision(
             AS_B,
             controller_keys[AS_B],
-            ControllerRuleEngine((ExactRule(proposal, prerequisite),)),
+            RuleEngine((exact_rule(proposal, prerequisite),)),
             proposal,
             agent_key,
         ),
@@ -236,7 +236,7 @@ def test_missing_prerequisite_denies_without_materializing(
 def test_response_set_must_exactly_match_authoritative_controllers(
     response_keys, proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         issuer: _decision(AS_A, controller_keys[AS_A], policy, proposal, agent_key)
         for issuer in response_keys
@@ -255,7 +255,7 @@ def test_response_set_must_exactly_match_authoritative_controllers(
 def test_response_must_be_issued_by_controller_it_is_keyed_under(
     proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         AS_A: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
         AS_B: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
@@ -291,7 +291,7 @@ def test_mismatched_controller_binding_denies_without_materializing(
     sentinel_key,
     decision_resolver,
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         AS_A: _normal_response(AS_A, controller_keys[AS_A], proposal, agent_key, **changes),
         AS_B: _decision(AS_B, controller_keys[AS_B], policy, proposal, agent_key),
@@ -315,7 +315,7 @@ def test_wrong_agent_confirmation_key_denies_without_materializing(
     proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
     other_agent_key = SigningKey.generate(kid="other-agent")
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         AS_A: _normal_response(
             AS_A,
@@ -344,7 +344,7 @@ def test_wrong_agent_confirmation_key_denies_without_materializing(
 def test_unsupported_controller_token_type_denies_without_materializing(
     proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         AS_A: issue_resource_token(
             issuer=AS_A,
@@ -377,7 +377,7 @@ def test_unsupported_controller_token_type_denies_without_materializing(
 def test_advisory_controllers_do_not_determine_required_responses(
     proposal, controller_keys, agent_key, sentinel_key, decision_resolver
 ):
-    policy = ControllerRuleEngine((ExactRule(proposal),))
+    policy = RuleEngine((exact_rule(proposal),))
     responses = {
         issuer: _decision(issuer, key, policy, proposal, agent_key)
         for issuer, key in controller_keys.items()

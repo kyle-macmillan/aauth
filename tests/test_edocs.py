@@ -5,7 +5,6 @@ import pytest
 from aauth_edocs import (
     MAX_FUNCTION_ARGS_BYTES,
     Dataflow,
-    ExactRule,
     FunctionDescriptor,
     ResourceBinding,
     SentinelRegistry,
@@ -83,25 +82,6 @@ def test_function_descriptor_carries_resource_owned_input_schema_metadata():
 
     assert descriptor.input_schema["required"] == ["query"]
     assert descriptor.input_schema["properties"]["limit"]["minimum"] == 1
-
-
-def test_exact_rule_matches_only_its_complete_dataflow():
-    target = _flow()
-    prerequisite = _flow(
-        source="aauth:upstream@ap.example",
-        function="prepare@1",
-        document="doc-input",
-    )
-    unconditional = ExactRule(target)
-    conditional = ExactRule(target, prerequisite)
-
-    assert unconditional.matches(target)
-    assert conditional.matches(target)
-    assert conditional.prerequisite == prerequisite
-    assert not conditional.matches(_flow(source="aauth:other@ap.example"))
-    assert not conditional.matches(_flow(function="other@1"))
-    assert not conditional.matches(_flow(document="doc-456"))
-    assert not conditional.matches(_flow(destination="aauth:other@ap.example"))
 
 
 def test_function_descriptor_is_immutable():

@@ -1,9 +1,9 @@
 from flask import Flask
 
 from aauth_edocs import (
-    ControllerRuleEngine,
+    RuleEngine,
     Dataflow,
-    ExactRule,
+    exact_rule,
     FunctionDescriptor,
     HttpRequest,
     JwksResolver,
@@ -91,10 +91,10 @@ def _world(*, conditional=False, controller_b_denies=False):
     transport.add(PS, _server_app(PS, "aauth-person.json", keys["ps"]))
     transport.add(OTHER_PS, _server_app(OTHER_PS, "aauth-person.json", keys["other_ps"]))
 
-    policy_a = ControllerRuleEngine((ExactRule(proposal),))
+    policy_a = RuleEngine((exact_rule(proposal),))
     policy_b_target = Dataflow(SOURCE, "identity@1", "other-doc", AGENT) if controller_b_denies else proposal
-    policy_b = ControllerRuleEngine(
-        (ExactRule(policy_b_target, prerequisite if conditional and not controller_b_denies else None),)
+    policy_b = RuleEngine(
+        (exact_rule(policy_b_target, prerequisite if conditional and not controller_b_denies else None),)
     )
     transport.add(
         AS_A,

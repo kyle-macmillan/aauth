@@ -1,9 +1,9 @@
 from flask import Flask
 
 from aauth_edocs import (
-    ControllerRuleEngine,
+    RuleEngine,
     Dataflow,
-    ExactRule,
+    exact_rule,
     HttpRequest,
     SigningKey,
     build_metadata,
@@ -57,7 +57,7 @@ def _world(conditional=False):
     )
     proposal = Dataflow(SOURCE, "identity@1", "doc-123", AGENT)
     prerequisite = Dataflow(SOURCE, "prepare@1", "doc-input", AGENT)
-    rule = ExactRule(proposal, prerequisite if conditional else None)
+    rule = exact_rule(proposal, prerequisite if conditional else None)
 
     transport.add(AP, _server_app(AP, "aauth-agent.json", ap_key))
     transport.add(RESOURCE, _server_app(RESOURCE, "aauth-resource.json", resource_key))
@@ -68,7 +68,7 @@ def _world(conditional=False):
         key=controller_key,
         transport=transport,
         sentinel=SENTINEL,
-        rule_engine=ControllerRuleEngine((rule,)),
+        rule_engine=RuleEngine((rule,)),
     )
     transport.add(CONTROLLER, app)
     return {
@@ -202,7 +202,7 @@ def test_edocs_mode_default_denies_when_policy_does_not_match():
 
 
 def test_edocs_configuration_is_paired():
-    policy = ControllerRuleEngine(())
+    policy = RuleEngine(())
 
     for kwargs in ({"sentinel": SENTINEL}, {"rule_engine": policy}):
         try:

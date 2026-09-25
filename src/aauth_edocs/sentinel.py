@@ -20,7 +20,7 @@ from .httpsig import HttpRequest, KeyResolver, peek_jwt, sign_server, verify
 from .ids import DWK_ACCESS, DWK_PERSON
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata, fetch_metadata
-from .rule_json import parse_dataflow, serialize_dataflow
+from .dataflow_json import parse_dataflow, serialize_dataflow
 from .tokens import (
     AUTH_TYP,
     CONDITIONAL_AUTH_TYP,

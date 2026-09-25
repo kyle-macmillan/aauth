@@ -15,8 +15,8 @@ from typing import Any, Callable
 from flask import Flask, request
 
 from .agent import RequestsTransport
-from .controller import ControllerRuleEvaluator, issue_controller_decision
-from .edocs import Dataflow, OutputOf
+from .controller import issue_controller_decision
+from .edocs import Dataflow
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN
 from .deferred import PendingStore
 from .headers import APPROVAL, CLAIMS, INTERACTION, build_requirement
@@ -24,8 +24,7 @@ from .httpsig import HttpRequest, verify
 from .ids import DWK_ACCESS
 from .keys import SigningKey, jwk_thumbprint
 from .metadata import JwksResolver, build_metadata
-from .rule_json import parse_dataflow, serialize_rule
-from .rule_store import MutableControllerRuleEngine
+from .rules import RuleAdmin, RuleEvaluator
 from .tokens import issue_auth_token, verify_agent_token, verify_resource_token
 
 # policy(ps_url, agent_claims, resource_token_claims) -> granted scope | None (deny) | deferred dict
@@ -43,7 +42,7 @@ def create_as(
     rules_path: str = "/rules",
     pending_path: str = "/pending",
     sentinel: str | None = None,
-    rule_engine: ControllerRuleEvaluator | None = None,
+    rule_engine: RuleEvaluator[Dataflow] | None = None,
 ) -> Flask:
     if (sentinel is None) != (rule_engine is None):
         raise ValueError("sentinel and rule_engine must be configured together")
@@ -138,77 +137,66 @@ def create_as(
         return _check_scope_and_issue(context, granted)
 
     # Rule management
-    def _mutable_engine() -> MutableControllerRuleEngine:
-        if not isinstance(rule_engine, MutableControllerRuleEngine):
+    def _rule_admin() -> RuleAdmin:
+        if not isinstance(rule_engine, RuleAdmin):
             raise AAuthError(INVALID_REQUEST, 404, "this AS has no mutable rule engine")
         return rule_engine
 
-    def _parse_rule_body() -> tuple[Dataflow, Dataflow | None]:
-        body = request.get_json(silent=True)
-        if not isinstance(body, dict) or set(body) - {"target", "prerequisite"} or "target" not in body:
-            raise AAuthError(INVALID_REQUEST, 400, "rule requires target and optional prerequisite")
-        prerequisite = body.get("prerequisite")
+    def _parse_rule_body(engine: RuleAdmin):
         try:
-            return (
-                parse_dataflow(body["target"]),
-                parse_dataflow(prerequisite) if prerequisite is not None else None,
-            )
+            return engine.parse_rule(request.get_json(silent=True))
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 400, str(error)) from error
-
-    def _reads(dataflow: Dataflow, edoc_id: str) -> bool:
-        document = dataflow.document
-        if isinstance(document, OutputOf):
-            return _reads(document.dataflow, edoc_id)
-        return document == edoc_id
 
     @app.get(rules_path, endpoint="aauth_as_list_rules")
     def list_rules():
         """Lists all rules; ``?edoc_id=<id>`` keeps only rules whose target
         reads that eDoc, directly or as the input of an ``output_of`` selector."""
+        engine = _rule_admin()
         edoc_id = request.args.get("edoc_id")
-        rules = _mutable_engine().list_rules()
+        rules = engine.list_rules()
         if edoc_id is not None:
-            rules = tuple(stored for stored in rules if _reads(stored.target, edoc_id))
-        return {"rules": [serialize_rule(stored) for stored in rules]}
+            rules = tuple(stored for stored in rules if engine.reads(stored, edoc_id))
+        return {"rules": [engine.serialize_rule(stored) for stored in rules]}
 
     @app.post(rules_path, endpoint="aauth_as_create_rule")
     def create_rule():
         """Creates a rule; the rule ID is assigned by the engine.
-        Body: ``{"target": <dataflow>, "prerequisite": <dataflow> | null}``."""
-        engine = _mutable_engine()
-        target, prerequisite = _parse_rule_body()
+        Body: ``{"target": <rule target>, "prerequisite": <dataflow> | null}``."""
+        engine = _rule_admin()
+        rule = _parse_rule_body(engine)
         try:
-            stored = engine.create_rule(target, prerequisite)
+            stored = engine.create_rule(rule)
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
-        return {"rule": serialize_rule(stored)}, 201
+        return {"rule": engine.serialize_rule(stored)}, 201
 
     @app.get(f"{rules_path}/<rule_id>", endpoint="aauth_as_get_rule")
     def get_rule(rule_id: str):
+        engine = _rule_admin()
         try:
-            stored = _mutable_engine().get_rule(rule_id)
+            stored = engine.get_rule(rule_id)
         except KeyError as error:
             raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
-        return {"rule": serialize_rule(stored)}
+        return {"rule": engine.serialize_rule(stored)}
 
     @app.put(f"{rules_path}/<rule_id>", endpoint="aauth_as_replace_rule")
     def replace_rule(rule_id: str):
         """Replaces the rule's target/prerequisite with those in the body."""
-        engine = _mutable_engine()
-        target, prerequisite = _parse_rule_body()
+        engine = _rule_admin()
+        rule = _parse_rule_body(engine)
         try:
-            stored = engine.replace_rule(rule_id, target, prerequisite)
+            stored = engine.replace_rule(rule_id, rule)
         except KeyError as error:
             raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
         except (TypeError, ValueError) as error:
             raise AAuthError(INVALID_REQUEST, 409, str(error)) from error
-        return {"rule": serialize_rule(stored)}
+        return {"rule": engine.serialize_rule(stored)}
 
     @app.delete(f"{rules_path}/<rule_id>", endpoint="aauth_as_delete_rule")
     def delete_rule(rule_id: str):
         try:
-            _mutable_engine().delete_rule(rule_id)
+            _rule_admin().delete_rule(rule_id)
         except KeyError as error:
             raise AAuthError(INVALID_REQUEST, 404, f"unknown rule ID: {rule_id}") from error
         return "", 204

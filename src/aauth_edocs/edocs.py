@@ -195,18 +195,6 @@ class DataflowBinding:
 
 
 @dataclass(frozen=True)
-class ExactRule:
-    """Allow one exact dataflow, optionally after another has materialized."""
-
-    dataflow: Dataflow
-    prerequisite: Dataflow | None = None
-
-    def matches(self, proposal: Dataflow) -> bool:
-        """Return whether *proposal* is the rule's exact target."""
-        return proposal == self.dataflow
-
-
-@dataclass(frozen=True)
 class FunctionDescriptor:
     """Immutable identity and implementation metadata for a function."""
 

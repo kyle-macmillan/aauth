@@ -1,6 +1,6 @@
 import pytest
 
-from aauth_edocs import ControllerRuleEngine, MutableControllerRuleEngine, parse_dataflow
+from aauth_edocs import Allow, Deny, PolicyVerdict, RuleEngine, parse_dataflow
 from aauth_edocs.asrv import create_as
 
 AS = "http://controller.local"
@@ -19,9 +19,28 @@ def _flow(document="doc-1", **changes):
     return value
 
 
+class _DenyingEnforcer:
+    def judge(self, question):
+        return PolicyVerdict(False, "not satisfied")
+
+
+class _EvaluateOnly:
+    def evaluate(self, proposal):
+        return Deny("evaluate-only engine")
+
+
+def _policy_target(document="doc-1", policy="Only aggregates are allowed"):
+    return {
+        "source": "aauth:source@ap.local",
+        "policy": policy,
+        "document": document,
+        "destination": "aauth:assistant@ap.local",
+    }
+
+
 @pytest.fixture
 def engine():
-    return MutableControllerRuleEngine()
+    return RuleEngine(enforcer=_DenyingEnforcer())
 
 
 @pytest.fixture
@@ -41,7 +60,35 @@ def test_create_assigns_id_and_registers_with_engine(client, engine):
     assert rule["rule_id"]
     assert rule["target"] == _flow()
     assert rule["prerequisite"] is None
-    assert engine.evaluate(parse_dataflow(_flow())) is not None
+    assert isinstance(engine.evaluate(parse_dataflow(_flow())), Allow)
+
+
+def test_create_policy_rule_round_trips(client, engine):
+    rule = _create(client, _policy_target())
+
+    assert rule["target"] == _policy_target()
+    assert engine.get_rule(rule["rule_id"]).rule.function.text == "Only aggregates are allowed"
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        {**_policy_target(), "function": "identity@1"},
+        {**_policy_target(), "function_args": {}},
+        _policy_target(policy="  "),
+    ],
+)
+def test_create_rejects_malformed_policy_targets(client, target):
+    response = client.post("/rules", json={"target": target})
+    assert response.status_code == 400
+
+
+def test_policy_rules_require_an_enforcer():
+    client = create_as(AS, sentinel=SENTINEL, rule_engine=RuleEngine()).test_client()
+
+    response = client.post("/rules", json={"target": _policy_target()})
+    assert response.status_code == 409
+    assert "policy enforcer" in response.get_json()["detail"]
 
 
 def test_create_accepts_prerequisite_and_omitted_prerequisite(client):
@@ -90,7 +137,7 @@ def test_get_replace_delete(client, engine):
     replaced = client.put(f"/rules/{rule_id}", json={"target": replacement})
     assert replaced.status_code == 200
     assert replaced.get_json()["rule"] == {"rule_id": rule_id, "target": replacement, "prerequisite": None}
-    assert engine.evaluate(parse_dataflow(_flow())) is None
+    assert isinstance(engine.evaluate(parse_dataflow(_flow())), Deny)
 
     assert client.delete(f"/rules/{rule_id}").status_code == 204
     assert engine.list_rules() == ()
@@ -111,7 +158,7 @@ def test_replace_rejects_target_owned_by_another_rule(client):
     assert response.status_code == 409
 
 
-@pytest.mark.parametrize("kwargs", [{}, {"sentinel": SENTINEL, "rule_engine": ControllerRuleEngine(())}])
+@pytest.mark.parametrize("kwargs", [{}, {"sentinel": SENTINEL, "rule_engine": _EvaluateOnly()}])
 def test_rules_unavailable_without_mutable_engine(kwargs):
     client = create_as(AS, **kwargs).test_client()
 
