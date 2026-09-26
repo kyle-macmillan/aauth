@@ -229,7 +229,6 @@ class SentinelRegistry:
     """Injected in-memory authority and provenance state for the demo."""
 
     resource_bindings: dict[str, ResourceBinding] = field(default_factory=dict)
-    resource_owner_ases: dict[str, str] = field(default_factory=dict)
     controllers: dict[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
     functions: dict[str, FunctionDescriptor] = field(default_factory=dict)
     materialized: set[Dataflow] = field(default_factory=set)
@@ -238,14 +237,78 @@ class SentinelRegistry:
     published_derived: set[str] = field(default_factory=set)
 
 
+def controller_set(controllers: Any) -> tuple[str, ...]:
+    """Validate a controller list: non-empty, distinct, non-empty strings."""
+    if (
+        isinstance(controllers, str)
+        or not isinstance(controllers, (list, tuple))
+        or not controllers
+        or any(not isinstance(item, str) or not item for item in controllers)
+    ):
+        raise ValueError("controllers must be a non-empty string list")
+    value = tuple(controllers)
+    if len(set(value)) != len(value):
+        raise ValueError("controllers must not contain duplicates")
+    return value
+
+
+def register_origin(
+    registry: SentinelRegistry,
+    *,
+    resource_issuer: str,
+    edoc_id: str,
+    controllers: Any,
+) -> tuple[str, ...]:
+    """Register an eDoc with no provenance and the controllers its registrant names."""
+    if not isinstance(resource_issuer, str) or not resource_issuer:
+        raise ValueError("resource_issuer must be a non-empty string")
+    if not isinstance(edoc_id, str) or not edoc_id:
+        raise ValueError("edoc_id must be a non-empty string")
+    if edoc_id in registry.derived_documents:
+        raise ValueError("derived eDocs inherit their controllers and are not origins")
+    value = controller_set(controllers)
+    key = (resource_issuer, edoc_id)
+    existing = registry.controllers.get(key)
+    if existing is not None and existing != value:
+        raise ValueError("controllers already registered for this eDoc with a different set")
+    registry.controllers[key] = value
+    return value
+
+
+def controllers_for(
+    registry: SentinelRegistry,
+    resource_issuer: str | None,
+    edoc_id: str,
+) -> tuple[str, ...] | None:
+    """Return an eDoc's authoritative controllers, or None if it is not an eDoc."""
+    derived = registry.derived_documents.get(edoc_id)
+    if derived is not None:
+        return derived.controllers
+    if resource_issuer is None:
+        return None
+    return registry.controllers.get((resource_issuer, edoc_id))
+
+
 def register_materialization(
     registry: SentinelRegistry,
     *,
     dataflow: Dataflow,
     output: Any,
-    controllers: tuple[str, ...],
 ) -> DerivedEdoc:
-    """Record a successful execution and mint its opaque derived eDoc ID."""
+    """Record a successful execution and mint its opaque derived eDoc ID.
+
+    The derived eDoc inherits the controllers of the eDoc it was computed from.
+    """
+    if not isinstance(dataflow.document, str):
+        raise ValueError("materialized dataflow must reference a concrete eDoc")
+    binding = registry.resource_bindings.get(dataflow.source)
+    controllers = controllers_for(
+        registry,
+        binding.resource_issuer if binding is not None else None,
+        dataflow.document,
+    )
+    if controllers is None:
+        raise ValueError(f"input eDoc has no registered controllers: {dataflow.document}")
     encoded = json.dumps(
         output,
         ensure_ascii=False,

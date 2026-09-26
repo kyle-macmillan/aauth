@@ -7,11 +7,13 @@ from aauth_edocs import (
     Dataflow,
     Deny,
     OutputOf,
+    ResourceBinding,
     RuleEngine,
     SentinelRegistry,
     exact_rule,
     parse_stored_rule,
     register_materialization,
+    register_origin,
     serialize_rule,
 )
 
@@ -91,7 +93,21 @@ def test_conditional_rule_and_json_round_trip_preserve_semantics():
 
 def test_future_output_rule_matches_only_after_trusted_materialization():
     producer = _flow()
-    registry = SentinelRegistry()
+    registry = SentinelRegistry(
+        resource_bindings={
+            producer.source: ResourceBinding(
+                source_ps="https://source-ps.example",
+                resource_issuer="https://resource.example",
+                resource_jkt="resource-key-thumbprint",
+            )
+        }
+    )
+    register_origin(
+        registry,
+        resource_issuer="https://resource.example",
+        edoc_id=producer.document,
+        controllers=["https://alice-as.example"],
+    )
     target = Dataflow.from_arguments(
         source=producer.destination,
         function="identity@1",
@@ -116,7 +132,6 @@ def test_future_output_rule_matches_only_after_trusted_materialization():
         registry,
         dataflow=producer,
         output={"rows": [{"value": 1}]},
-        controllers=("https://alice-as.example",),
     )
     proposal = Dataflow.from_arguments(
         target.source,

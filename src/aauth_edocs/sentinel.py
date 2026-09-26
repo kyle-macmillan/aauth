@@ -13,7 +13,10 @@ from .edocs import (
     FunctionDescriptor,
     ResourceBinding,
     SentinelRegistry,
+    controller_set,
+    controllers_for,
     register_materialization,
+    register_origin,
 )
 from .errors import AAuthError, DENIED, INVALID_REQUEST, INVALID_TOKEN, SERVER_ERROR
 from .httpsig import HttpRequest, KeyResolver, peek_jwt, sign_server, verify
@@ -47,8 +50,16 @@ def create_sentinel(
     jwks_path: str = "/jwks.json",
     on_function_register: FunctionRegister | None = None,
     execute_function: ExecuteFunction | None = None,
+    manual_registration: bool = True,
 ) -> Flask:
-    """Create the Sentinel's AS-facing, PS-facing, and registry HTTP adapter."""
+    """Create the Sentinel's AS-facing, PS-facing, and registry HTTP adapter.
+
+    With ``manual_registration`` (vetted origins), an eDoc with no provenance
+    is authorized only after an explicit ``/registry/origins`` call. Without
+    it, such an eDoc is registered the first time it reaches ``/token``, with
+    the controllers its resource names. Nothing detects a derived output
+    re-uploaded as a new origin; vetting is what guards against that.
+    """
     app = app or Flask("aauth-sentinel")
     key = key or SigningKey.generate(kid="sentinel")
     transport = transport or RequestsTransport()
@@ -57,6 +68,7 @@ def create_sentinel(
         "issuer": issuer,
         "key": key,
         "registry": registry,
+        "manual_registration": manual_registration,
     }
 
     @app.errorhandler(AAuthError)
@@ -158,17 +170,23 @@ def create_sentinel(
             raise AAuthError(DENIED, 403, "resource token issuer does not match its provisioned binding")
         if jwk_thumbprint(resource_jwk) != binding.resource_jkt:
             raise AAuthError(DENIED, 403, "resource token key does not match its provisioned binding")
-        controller_key = (rt_claims["iss"], proposal.document)
-        authoritative = registry.controllers.get(controller_key)
-        discovered = authoritative is None
-        if discovered:
-            if rt_claims["controllers"]:
-                authoritative = tuple(rt_claims["controllers"])
-            else:
-                owner_as = registry.resource_owner_ases.get(rt_claims["iss"])
-                if owner_as is None:
-                    raise AAuthError(DENIED, 403, "resource owner has no provisioned controller AS")
-                authoritative = (owner_as,)
+        authoritative = controllers_for(registry, rt_claims["iss"], proposal.document)
+        if authoritative is None:
+            if manual_registration:
+                raise AAuthError(DENIED, 403, "eDoc has no registered controllers")
+            try:
+                authoritative = register_origin(
+                    registry,
+                    resource_issuer=rt_claims["iss"],
+                    edoc_id=proposal.document,
+                    controllers=rt_claims["controllers"],
+                )
+            except ValueError as error:
+                raise AAuthError(DENIED, 403, f"eDoc cannot be registered: {error}") from error
+        elif tuple(rt_claims["controllers"]) != authoritative:
+            raise AAuthError(
+                DENIED, 403, "resource token controllers do not match the eDoc's controllers"
+            )
 
         responses = {}
         for controller in authoritative:
@@ -210,8 +228,6 @@ def create_sentinel(
             key_resolver=resolver,
             authoritative_controllers=authoritative,
         )
-        if discovered:
-            registry.controllers[controller_key] = authoritative
         return {"auth_token": token, "expires_in": 3600}
 
     def _public_function(descriptor: FunctionDescriptor) -> dict[str, Any]:
@@ -226,6 +242,7 @@ def create_sentinel(
     def registry_state():
         return jsonify(
             {
+                "manual_registration": manual_registration,
                 "resource_bindings": [
                     {
                         "source_agent": source,
@@ -323,8 +340,33 @@ def create_sentinel(
             }
         ), 201
 
+    @app.post("/registry/origins")
+    def register_origin_edoc():
+        body = _json_object()
+        if set(body) != {"resource_issuer", "edoc_id", "controllers"}:
+            raise ValueError(
+                "origin registration requires resource_issuer, "
+                "edoc_id, and controllers"
+            )
+        controllers = register_origin(
+            registry,
+            resource_issuer=body["resource_issuer"],
+            edoc_id=body["edoc_id"],
+            controllers=body["controllers"],
+        )
+        return jsonify(
+            {
+                "origin": {
+                    "resource_issuer": body["resource_issuer"],
+                    "edoc_id": body["edoc_id"],
+                    "controllers": list(controllers),
+                }
+            }
+        ), 201
+
     @app.post("/registry/controllers")
     def register_controllers():
+        """Publish a derived eDoc at a resource under its inherited controllers."""
         body = _json_object()
         if set(body) != {"resource_issuer", "edoc_id", "controllers"}:
             raise ValueError(
@@ -333,32 +375,23 @@ def create_sentinel(
             )
         resource_issuer = body["resource_issuer"]
         edoc_id = body["edoc_id"]
-        controllers = body["controllers"]
         if not isinstance(resource_issuer, str) or not resource_issuer:
             raise ValueError("resource_issuer must be a non-empty string")
         if not isinstance(edoc_id, str) or not edoc_id:
             raise ValueError("edoc_id must be a non-empty string")
-        if (
-            not isinstance(controllers, list)
-            or not controllers
-            or any(not isinstance(item, str) or not item for item in controllers)
-        ):
-            raise ValueError("controllers must be a non-empty string list")
-        controller_key = (resource_issuer, edoc_id)
-        controller_tuple = tuple(controllers)
-        existing = registry.controllers.get(controller_key)
-        if existing is not None and existing != controller_tuple:
-            raise ValueError(
-                "controllers already registered for this eDoc with a different set"
-            )
         derived = registry.derived_documents.get(edoc_id)
-        if derived is not None and tuple(derived.controllers) != controller_tuple:
+        if derived is None:
+            raise ValueError(
+                "only derived eDocs are published here; "
+                "register origin eDocs at /registry/origins"
+            )
+        controller_tuple = controller_set(body["controllers"])
+        if controller_tuple != derived.controllers:
             raise ValueError(
                 "controllers must match the inherited derived eDoc controllers"
             )
-        registry.controllers[controller_key] = controller_tuple
-        if edoc_id in registry.derived_documents:
-            registry.published_derived.add(edoc_id)
+        registry.controllers[(resource_issuer, edoc_id)] = controller_tuple
+        registry.published_derived.add(edoc_id)
         return jsonify(
             {
                 "controller": {
@@ -439,7 +472,6 @@ def create_sentinel(
             registry,
             dataflow=dataflow,
             output=transformed,
-            controllers=derived.controllers,
         )
         return jsonify(
             {
@@ -453,25 +485,15 @@ def create_sentinel(
     @app.post("/registry/materializations")
     def record_materialization():
         body = _json_object()
-        if set(body) != {"dataflow", "output", "controllers"}:
-            raise ValueError(
-                "materialization requires dataflow, output, and controllers"
-            )
+        if set(body) != {"dataflow", "output"}:
+            raise ValueError("materialization requires dataflow and output")
         if not isinstance(body["output"], dict):
             raise ValueError("output must be a JSON object")
-        controllers = body["controllers"]
-        if (
-            not isinstance(controllers, list)
-            or not controllers
-            or any(not isinstance(item, str) or not item for item in controllers)
-        ):
-            raise ValueError("controllers must be a non-empty string list")
         dataflow = parse_dataflow(body["dataflow"])
         derived = register_materialization(
             registry,
             dataflow=dataflow,
             output=body["output"],
-            controllers=tuple(controllers),
         )
         return jsonify(
             {

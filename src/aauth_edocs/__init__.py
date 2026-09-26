@@ -16,8 +16,11 @@ from .edocs import (
     ResourceBinding,
     SentinelRegistry,
     canonicalize_function_args,
+    controller_set,
+    controllers_for,
     hash_function_args,
     register_materialization,
+    register_origin,
 )
 from .edocs_consent import EdocsApprovalHandler, EdocsApprovalRequest, EdocsConsentClient
 from .errors import AAuthError

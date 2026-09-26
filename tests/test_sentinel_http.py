@@ -46,7 +46,7 @@ def _server_app(issuer, dwk, key):
     return app
 
 
-def _world(*, conditional=False, controller_b_denies=False):
+def _world(*, conditional=False, controller_b_denies=False, manual_registration=True):
     transport = LoopbackTransport()
     keys = {
         "ap": SigningKey.generate(kid="ap"),
@@ -81,7 +81,6 @@ def _world(*, conditional=False, controller_b_denies=False):
                 resource_jkt=keys["resource"].thumbprint,
             )
         },
-        resource_owner_ases={RESOURCE: AS_A},
         controllers={(RESOURCE, "doc-123"): (AS_A, AS_B)},
         functions={descriptor.id: descriptor},
     )
@@ -121,6 +120,7 @@ def _world(*, conditional=False, controller_b_denies=False):
         registry=registry,
         key=keys["sentinel"],
         transport=transport,
+        manual_registration=manual_registration,
     )
     transport.add(SENTINEL, sentinel_app)
     return {
@@ -143,7 +143,7 @@ def _resource_token(world, **changes):
         "scope": proposal.function,
         "source_agent": proposal.source,
         "edoc_id": proposal.document,
-        "controllers": ("https://advisory-a.example",),
+        "controllers": (AS_A, AS_B),
         "key": world["keys"]["resource"],
     }
     values.update(changes)
@@ -190,11 +190,34 @@ def test_sentinel_http_flow_mints_one_final_resource_token():
     )
 
 
-def test_unknown_edoc_discovers_populated_controllers_and_caches_them():
+def test_manual_registration_denies_unregistered_edoc():
     world = _world()
     world["registry"].controllers.clear()
 
-    response = _post(world, _resource_token(world, controllers=(AS_A, AS_B)))
+    response = _post(world, _resource_token(world))
+
+    assert response.status_code == 403
+    assert "no registered controllers" in response.json()["detail"]
+    assert (RESOURCE, "doc-123") not in world["registry"].controllers
+
+
+def test_registered_edoc_rejects_mismatched_controllers_claim():
+    world = _world()
+
+    subset = _post(world, _resource_token(world, controllers=(AS_A,)))
+    reordered = _post(world, _resource_token(world, controllers=(AS_B, AS_A)))
+
+    for response in (subset, reordered):
+        assert response.status_code == 403
+        assert "do not match" in response.json()["detail"]
+    assert world["registry"].controllers[(RESOURCE, "doc-123")] == (AS_A, AS_B)
+
+
+def test_open_registration_registers_unknown_edoc_from_resource_claim():
+    world = _world(manual_registration=False)
+    world["registry"].controllers.clear()
+
+    response = _post(world, _resource_token(world))
 
     assert response.status_code == 200
     assert world["registry"].controllers[(RESOURCE, "doc-123")] == (AS_A, AS_B)
@@ -202,26 +225,25 @@ def test_unknown_edoc_discovers_populated_controllers_and_caches_them():
     assert claims["controllers"] == [AS_A, AS_B]
 
 
-def test_unknown_edoc_with_empty_controllers_uses_resource_owner_as():
-    world = _world()
+def test_open_registration_denies_empty_controllers():
+    world = _world(manual_registration=False)
     world["registry"].controllers.clear()
 
     response = _post(world, _resource_token(world, controllers=[]))
 
-    assert response.status_code == 200
-    assert world["registry"].controllers[(RESOURCE, "doc-123")] == (AS_A,)
-    _, claims = peek_jwt(response.json()["auth_token"])
-    assert claims["controllers"] == [AS_A]
+    assert response.status_code == 403
+    assert "cannot be registered" in response.json()["detail"]
+    assert (RESOURCE, "doc-123") not in world["registry"].controllers
 
 
-def test_failed_unknown_edoc_discovery_is_not_cached():
-    world = _world(controller_b_denies=True)
+def test_open_registration_persists_when_a_controller_denies():
+    world = _world(controller_b_denies=True, manual_registration=False)
     world["registry"].controllers.clear()
 
-    response = _post(world, _resource_token(world, controllers=(AS_A, AS_B)))
+    response = _post(world, _resource_token(world))
 
     assert response.status_code == 403
-    assert (RESOURCE, "doc-123") not in world["registry"].controllers
+    assert world["registry"].controllers[(RESOURCE, "doc-123")] == (AS_A, AS_B)
 
 
 def test_sentinel_requires_agent_token_ps_to_match_request_signer():

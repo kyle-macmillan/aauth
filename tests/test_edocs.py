@@ -9,7 +9,10 @@ from aauth_edocs import (
     ResourceBinding,
     SentinelRegistry,
     canonicalize_function_args,
+    controllers_for,
     hash_function_args,
+    register_materialization,
+    register_origin,
 )
 
 
@@ -136,7 +139,6 @@ def test_sentinel_registry_holds_injected_authority_and_provenance_state():
     flow = _flow()
     registry = SentinelRegistry(
         resource_bindings={source: binding},
-        resource_owner_ases={"https://resource.example": "https://owner-as.example"},
         controllers={
             ("https://resource.example", "doc-123"): (
                 "https://as-a.example",
@@ -148,7 +150,6 @@ def test_sentinel_registry_holds_injected_authority_and_provenance_state():
     )
 
     assert registry.resource_bindings[source] == binding
-    assert registry.resource_owner_ases["https://resource.example"] == "https://owner-as.example"
     assert registry.controllers[("https://resource.example", "doc-123")] == (
         "https://as-a.example",
         "https://as-b.example",
@@ -160,3 +161,76 @@ def test_sentinel_registry_holds_injected_authority_and_provenance_state():
 def test_sentinel_registry_defaults_are_not_shared():
     first = SentinelRegistry()
     second = SentinelRegistry()
+
+
+RESOURCE = "https://resource.example"
+AS_A = "https://as-a.example"
+AS_B = "https://as-b.example"
+
+
+def _bound_registry() -> SentinelRegistry:
+    return SentinelRegistry(
+        resource_bindings={
+            _flow().source: ResourceBinding(
+                source_ps="https://source-ps.example",
+                resource_issuer=RESOURCE,
+                resource_jkt="resource-key-thumbprint",
+            )
+        }
+    )
+
+
+def test_register_origin_is_idempotent_and_rejects_conflicts():
+    registry = SentinelRegistry()
+
+    assert register_origin(
+        registry, resource_issuer=RESOURCE, edoc_id="doc-123", controllers=[AS_A, AS_B]
+    ) == (AS_A, AS_B)
+    assert register_origin(
+        registry, resource_issuer=RESOURCE, edoc_id="doc-123", controllers=[AS_A, AS_B]
+    ) == (AS_A, AS_B)
+    with pytest.raises(ValueError, match="different set"):
+        register_origin(
+            registry, resource_issuer=RESOURCE, edoc_id="doc-123", controllers=[AS_B]
+        )
+    assert registry.controllers[(RESOURCE, "doc-123")] == (AS_A, AS_B)
+
+
+@pytest.mark.parametrize("controllers", [[], [AS_A, AS_A], [""], AS_A, None])
+def test_register_origin_rejects_invalid_controllers(controllers):
+    registry = SentinelRegistry()
+
+    with pytest.raises(ValueError, match="controllers"):
+        register_origin(
+            registry, resource_issuer=RESOURCE, edoc_id="doc-123", controllers=controllers
+        )
+    assert registry.controllers == {}
+
+
+def test_derived_edocs_inherit_controllers_and_cannot_be_origins():
+    registry = _bound_registry()
+    register_origin(registry, resource_issuer=RESOURCE, edoc_id="doc-123", controllers=[AS_A])
+
+    derived = register_materialization(registry, dataflow=_flow(), output={"ok": True})
+    transformed = register_materialization(
+        registry,
+        dataflow=_flow(source="aauth:unbound@ap.example", document=derived.edoc_id),
+        output={"ok": True},
+    )
+
+    assert derived.controllers == (AS_A,)
+    assert transformed.controllers == (AS_A,)
+    assert controllers_for(registry, None, derived.edoc_id) == (AS_A,)
+    with pytest.raises(ValueError, match="derived"):
+        register_origin(
+            registry, resource_issuer=RESOURCE, edoc_id=derived.edoc_id, controllers=[AS_B]
+        )
+
+
+def test_materialization_requires_a_controlled_input():
+    registry = _bound_registry()
+
+    assert controllers_for(registry, RESOURCE, "doc-123") is None
+    with pytest.raises(ValueError, match="no registered controllers"):
+        register_materialization(registry, dataflow=_flow(), output={"ok": True})
+    assert registry.materialized == set()

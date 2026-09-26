@@ -3,6 +3,7 @@
 from aauth_edocs import (
     Dataflow,
     FunctionDescriptor,
+    ResourceBinding,
     SentinelRegistry,
     SigningKey,
     create_sentinel,
@@ -18,8 +19,22 @@ RESOURCE = "http://resource.local"
 PS = "http://ps.local"
 
 
+def _seeded_registry():
+    """A registry where SOURCE serves origin eDoc doc_1, controlled by AS."""
+    return SentinelRegistry(
+        resource_bindings={
+            SOURCE: ResourceBinding(
+                source_ps=PS,
+                resource_issuer=RESOURCE,
+                resource_jkt="jkt-1",
+            )
+        },
+        controllers={(RESOURCE, "doc_1"): (AS,)},
+    )
+
+
 def _client(registry=None, on_function_register=None):
-    registry = registry or SentinelRegistry()
+    registry = registry or _seeded_registry()
     app = create_sentinel(
         issuer=SENTINEL,
         registry=registry,
@@ -45,7 +60,6 @@ def test_materialize_get_derived_and_publish_controllers():
         json={
             "dataflow": serialize_dataflow(producer),
             "output": output,
-            "controllers": [AS],
         },
     )
     assert created.status_code == 201
@@ -81,6 +95,112 @@ def test_materialize_get_derived_and_publish_controllers():
 
     again = client.get(f"/registry/derived/{edoc_id}")
     assert again.get_json()["published"] is True
+
+
+def test_origin_registration_is_idempotent_and_rejects_conflicts():
+    client, registry = _client(SentinelRegistry())
+    payload = {"resource_issuer": RESOURCE, "edoc_id": "doc_2", "controllers": [AS]}
+
+    first = client.post("/registry/origins", json=payload)
+    again = client.post("/registry/origins", json=payload)
+    conflict = client.post(
+        "/registry/origins",
+        json={**payload, "controllers": ["http://other-as.local"]},
+    )
+    empty = client.post("/registry/origins", json={**payload, "edoc_id": "doc_3", "controllers": []})
+
+    assert first.status_code == 201
+    assert first.get_json()["origin"]["controllers"] == [AS]
+    assert again.status_code == 201
+    assert conflict.status_code == 400
+    assert empty.status_code == 400
+    assert registry.controllers == {(RESOURCE, "doc_2"): (AS,)}
+
+
+def test_derived_edocs_cannot_be_registered_as_origins():
+    client, registry = _client()
+    created = client.post(
+        "/registry/materializations",
+        json={
+            "dataflow": serialize_dataflow(
+                Dataflow.from_arguments(SOURCE, "identity@1", "doc_1", DESTINATION, {})
+            ),
+            "output": {"ok": True},
+        },
+    )
+    edoc_id = created.get_json()["derived_edoc_id"]
+
+    response = client.post(
+        "/registry/origins",
+        json={"resource_issuer": RESOURCE, "edoc_id": edoc_id, "controllers": ["http://other-as.local"]},
+    )
+
+    assert response.status_code == 400
+    assert "derived" in response.get_json()["detail"]
+    assert (RESOURCE, edoc_id) not in registry.controllers
+
+
+def test_publish_accepts_only_derived_edocs_with_inherited_controllers():
+    client, registry = _client()
+    created = client.post(
+        "/registry/materializations",
+        json={
+            "dataflow": serialize_dataflow(
+                Dataflow.from_arguments(SOURCE, "identity@1", "doc_1", DESTINATION, {})
+            ),
+            "output": {"ok": True},
+        },
+    )
+    edoc_id = created.get_json()["derived_edoc_id"]
+
+    origin = client.post(
+        "/registry/controllers",
+        json={"resource_issuer": RESOURCE, "edoc_id": "doc_9", "controllers": [AS]},
+    )
+    wrong = client.post(
+        "/registry/controllers",
+        json={"resource_issuer": RESOURCE, "edoc_id": edoc_id, "controllers": ["http://other-as.local"]},
+    )
+
+    assert origin.status_code == 400
+    assert "/registry/origins" in origin.get_json()["detail"]
+    assert wrong.status_code == 400
+    assert (RESOURCE, "doc_9") not in registry.controllers
+    assert edoc_id not in registry.published_derived
+
+
+def test_materialization_requires_controlled_input_and_ignores_caller_controllers():
+    client, registry = _client()
+    unknown = client.post(
+        "/registry/materializations",
+        json={
+            "dataflow": serialize_dataflow(
+                Dataflow.from_arguments(SOURCE, "identity@1", "doc_unregistered", DESTINATION, {})
+            ),
+            "output": {"ok": True},
+        },
+    )
+    with_controllers = client.post(
+        "/registry/materializations",
+        json={
+            "dataflow": serialize_dataflow(
+                Dataflow.from_arguments(SOURCE, "identity@1", "doc_1", DESTINATION, {})
+            ),
+            "output": {"ok": True},
+            "controllers": ["http://other-as.local"],
+        },
+    )
+
+    assert unknown.status_code == 400
+    assert "no registered controllers" in unknown.get_json()["detail"]
+    assert with_controllers.status_code == 400
+    assert registry.derived_documents == {}
+
+
+def test_registry_state_reports_manual_registration():
+    client, _ = _client()
+
+    assert client.get("/registry").get_json()["manual_registration"] is True
 
 
 def test_binding_idempotent_and_rejects_conflict():
@@ -156,7 +276,6 @@ def test_registry_state_dump_includes_published_flag():
         json={
             "dataflow": serialize_dataflow(producer),
             "output": {"ok": True},
-            "controllers": [AS],
         },
     )
     edoc_id = created.get_json()["derived_edoc_id"]
@@ -179,7 +298,7 @@ def test_transform_records_source_equals_destination():
             "truncated": False,
         }
 
-    registry = SentinelRegistry()
+    registry = _seeded_registry()
     registry.functions["count_names@1"] = FunctionDescriptor(
         id="count_names@1",
         description="count",
@@ -212,7 +331,6 @@ def test_transform_records_source_equals_destination():
                 "rows": [{"name": "Ada"}, {"name": "Bob"}],
                 "truncated": False,
             },
-            "controllers": [AS],
         },
     )
     assert created.status_code == 201
