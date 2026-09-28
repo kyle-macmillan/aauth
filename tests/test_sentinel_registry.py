@@ -288,32 +288,8 @@ def test_registry_state_dump_includes_published_flag():
     assert edoc_id in registry.derived_outputs
 
 
-def test_transform_records_source_equals_destination():
-    def execute(function_id, output, function_args):
-        assert function_id == "count_names@1"
-        assert function_args == {}
-        return {
-            "columns": ["employee_count"],
-            "rows": [{"employee_count": len(output["rows"])}],
-            "truncated": False,
-        }
-
-    registry = _seeded_registry()
-    registry.functions["count_names@1"] = FunctionDescriptor(
-        id="count_names@1",
-        description="count",
-        implementation_uri="demo://count",
-        digest="sha256:abc",
-    )
-    app = create_sentinel(
-        issuer=SENTINEL,
-        registry=registry,
-        key=SigningKey.generate("sentinel"),
-        execute_function=execute,
-    )
-    app.config["TESTING"] = True
-    client = app.test_client()
-
+def test_possessor_materialization_records_source_equals_destination():
+    client, registry = _client()
     created = client.post(
         "/registry/materializations",
         json={
@@ -336,32 +312,23 @@ def test_transform_records_source_equals_destination():
     assert created.status_code == 201
     input_id = created.get_json()["derived_edoc_id"]
 
-    denied = client.post(
-        f"/registry/derived/{input_id}/transform",
-        json={
-            "possessor": "aauth:other@demo.local",
-            "function_id": "count_names@1",
-            "function_args": {},
-        },
-    )
-    assert denied.status_code == 403
-
-    unknown_fn = client.post(
-        f"/registry/derived/{input_id}/transform",
-        json={
-            "possessor": DESTINATION,
-            "function_id": "missing@1",
-            "function_args": {},
-        },
-    )
-    assert unknown_fn.status_code == 404
-
     transformed = client.post(
-        f"/registry/derived/{input_id}/transform",
+        "/registry/materializations",
         json={
-            "possessor": DESTINATION,
-            "function_id": "count_names@1",
-            "function_args": {},
+            "dataflow": serialize_dataflow(
+                Dataflow.from_arguments(
+                    DESTINATION,
+                    "count_names@1",
+                    input_id,
+                    DESTINATION,
+                    {},
+                )
+            ),
+            "output": {
+                "columns": ["employee_count"],
+                "rows": [{"employee_count": 2}],
+                "truncated": False,
+            },
         },
     )
     assert transformed.status_code == 201
@@ -370,7 +337,7 @@ def test_transform_records_source_equals_destination():
     assert new_id != input_id
     assert body["possessor"] == DESTINATION
     assert body["controllers"] == [AS]
-    assert body["output"]["rows"] == [{"employee_count": 2}]
+    assert "output" not in body
 
     derived = registry.derived_documents[new_id]
     assert derived.dataflow.source == DESTINATION
@@ -378,6 +345,6 @@ def test_transform_records_source_equals_destination():
     assert derived.dataflow.function == "count_names@1"
     assert derived.dataflow.document == input_id
     assert derived.possessor == DESTINATION
-    assert new_id in registry.derived_outputs
+    assert registry.derived_outputs[new_id]["rows"] == [{"employee_count": 2}]
     assert input_id not in registry.published_derived
     assert new_id not in registry.published_derived
