@@ -44,10 +44,12 @@ from .metadata import JwksResolver, Metadata, build_metadata, fetch_metadata, st
 from .dataflow_json import parse_dataflow, serialize_dataflow
 from .rules import (
     Allow,
+    CompletionModel,
     DataflowRule,
     Deny,
     ExactFunction,
     FunctionSource,
+    LlmPolicyEnforcer,
     Policy,
     PolicyEnforcer,
     PolicyQuestion,

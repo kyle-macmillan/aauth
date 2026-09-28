@@ -22,6 +22,9 @@ flask = [
     "flask>=3.0",
     "requests>=2.31",
 ]
+policy = [
+    "anthropic>=1.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aauth_edocs"]
@@ -35,7 +38,7 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
-    "aauth-edocs[client,flask]",
+    "aauth-edocs[client,flask,policy]",
     "pytest>=8.0",
 ]
 # Cross-checks against the exploratory PyPI implementation (christian-posta/aauth-python-library).

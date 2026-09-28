@@ -5,6 +5,7 @@ This package decides; it never signs. Token issuance lives in
 """
 
 from .engine import RuleEngine
+from .llm import CompletionModel, LlmPolicyEnforcer, PolicyResponseError
 from .model import (
     Allow,
     DataflowRule,
